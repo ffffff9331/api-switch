@@ -83,7 +83,7 @@ The page lets you:
 - Store the API key in a local key file instead of `config.toml`
 - Remove a managed profile
 - Switch between ChatGPT account login and any managed relay profile
-- Optionally migrate local chat history and restart Codex after switching
+- Migrate local chat history and restart Codex after switching if needed
 - Send one small Codex test request through the selected profile
 
 The main web flow only asks for name, base URL, API key, and model. You can load models from the relay or type a model manually.
@@ -93,6 +93,7 @@ For an existing profile, click `Edit` in the profile list, change the fields, th
 When switching in the web UI:
 
 - codex-switch always migrates local Codex chat history to the selected provider.
+- codex-switch also rewrites existing local thread models to the selected profile model, so old conversations follow the same model as new ones after a switch.
 - Check `Restart Codex after switching` if you also want to restart the macOS Codex app so history is reloaded immediately.
 - Leave it unchecked if you want to restart Codex yourself.
 
@@ -147,7 +148,7 @@ Switch back to the ChatGPT account login:
 codex-switch account
 ```
 
-When switching between account login and a relay profile, codex-switch also moves local Codex thread records to the selected provider so history remains visible across modes. It backs up `~/.codex/state_5.sqlite` before changing the thread database.
+When switching between account login and a relay profile, codex-switch also moves local Codex thread records to the selected provider so history remains visible across modes. When switching to a relay profile, it also rewrites existing local thread models to that profile's configured model, so old conversations continue on the same target model as new ones. It backs up `~/.codex/state_5.sqlite` before changing the thread database.
 
 This migration is for conversation visibility. It does not replace Codex account-only features tied to a logged-in workspace or bound Git repository.
 
@@ -302,6 +303,7 @@ Web 页面可以完成这些操作：
 含义是：
 
 - 点 `使用中转` 或 `使用账号` 时，都会自动迁移本地 Codex 历史会话到目标 provider。
+- 点 `使用中转` 时，还会把现有本地历史线程的模型统一改成当前所选 profile 配置的模型，所以旧会话和新会话会保持一致。
 - 不勾选：只迁移历史并切换配置，不自动重启 Codex。
 - 勾选：迁移历史、切换配置，并重启 macOS Codex App，让历史重新加载。
 

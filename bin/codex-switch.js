@@ -321,13 +321,16 @@ function defaultCommand(args) {
     throw new Error(`Managed profile not found: ${args.name}`);
   }
   setDefaultProfile(args.name, codexHome);
-  const migration = args.noMigrateHistory || args.keepAccountWorkspace ? null : migrateThreads(codexHome, providerId(args.name));
+  const migration = args.noMigrateHistory || args.keepAccountWorkspace
+    ? null
+    : migrateThreads(codexHome, providerId(args.name), { toModel: profile.model });
   console.log(`Set default Codex profile: ${args.name}`);
   if (args.keepAccountWorkspace) {
     console.log("Kept Codex thread workspace metadata unchanged.");
   }
   if (migration) {
     console.log(`Moved ${migration.changed} thread(s) to provider: ${providerId(args.name)}`);
+    if (migration.modelChanged) console.log(`Updated ${migration.modelChanged} thread model(s) to: ${profile.model}`);
     console.log(`Updated ${migration.rolloutChanged} rollout file(s).`);
     if (migration.repairedRolloutPaths) console.log(`Repaired ${migration.repairedRolloutPaths} rollout path(s).`);
     console.log(`Backup: ${migration.backupPath}`);
@@ -562,10 +565,12 @@ function repairRolloutPath(rolloutPath, stamp) {
   return originalPath;
 }
 
-function migrateThreads(codexHome, provider) {
+function migrateThreads(codexHome, provider, options = {}) {
   validateName(provider);
   const stateDb = path.join(codexHome, "state_5.sqlite");
   if (!fs.existsSync(stateDb)) return null;
+  const toModel = typeof options.toModel === "string" ? options.toModel : "";
+  const shouldMigrateModel = Boolean(toModel);
 
   const rolloutRows = sqlite(
     stateDb,
@@ -585,6 +590,18 @@ function migrateThreads(codexHome, provider) {
       `select count(*) from threads where coalesce(model_provider, '') != ${sqlString(provider)};`,
     ),
   );
+  const modelChanged = shouldMigrateModel
+    ? Number(
+        sqlite(
+          stateDb,
+          [
+            "select count(*) from threads",
+            `where coalesce(model, '') != ${sqlString(toModel)}`,
+            "and coalesce(model, '') != ''",
+          ].join(" "),
+        ),
+      )
+    : 0;
 
   const stamp = new Date().toISOString().replace(/[-:.TZ]/g, "").slice(0, 14);
   const repairs = [];
@@ -597,7 +614,7 @@ function migrateThreads(codexHome, provider) {
   }
   const rolloutChanged = rolloutRows.filter((row) => updateRolloutProvider(row.rolloutPath, provider, stamp)).length;
 
-  if (!changed && !rolloutChanged && repairs.length === 0) return null;
+  if (!changed && !modelChanged && !rolloutChanged && repairs.length === 0) return null;
 
   const backupPath = `${stateDb}.codex-switch-${stamp}.bak`;
   fs.copyFileSync(stateDb, backupPath);
@@ -619,7 +636,18 @@ function migrateThreads(codexHome, provider) {
       `where coalesce(model_provider, '') != ${sqlString(provider)};`,
     ].join(" "),
   );
-  return { changed, backupPath, rolloutChanged, repairedRolloutPaths: repairs.length };
+  if (shouldMigrateModel && modelChanged) {
+    sqlite(
+      stateDb,
+      [
+        "update threads",
+        `set model = ${sqlString(toModel)}`,
+        `where coalesce(model, '') != ${sqlString(toModel)}`,
+        "and coalesce(model, '') != ''",
+      ].join(" "),
+    );
+  }
+  return { changed, modelChanged, backupPath, rolloutChanged, repairedRolloutPaths: repairs.length };
 }
 
 function threadModelCommand(args) {
@@ -1861,8 +1889,14 @@ function startWeb(args) {
 
       if (req.method === "POST" && url.pathname === "/api/default") {
         const payload = normalizeWebPayload(await readJson(req));
+        const profile = getManagedProfile(codexHome, payload.name);
+        if (!profile) {
+          throw new Error(`Managed profile not found: ${payload.name}`);
+        }
         setDefaultProfile(payload.name, codexHome);
-        const migration = migrateThreads(codexHome, providerId(payload.name));
+        const migration = migrateThreads(codexHome, providerId(payload.name), {
+          toModel: profile.model,
+        });
         if (payload.restartCodex) restartCodexApp();
         sendJson(res, 200, {
           message: payload.restartCodex
@@ -1871,7 +1905,7 @@ function startWeb(args) {
           details: [
             `Config: ${path.join(codexHome, "config.toml")}`,
             migration
-              ? `Moved ${migration.changed} thread(s), updated ${migration.rolloutChanged} rollout file(s), and repaired ${migration.repairedRolloutPaths} rollout path(s) to provider '${providerId(payload.name)}'. Backup: ${migration.backupPath}`
+              ? `Moved ${migration.changed} thread(s), updated ${migration.modelChanged} thread model(s) to '${profile.model}', updated ${migration.rolloutChanged} rollout file(s), and repaired ${migration.repairedRolloutPaths} rollout path(s) to provider '${providerId(payload.name)}'. Backup: ${migration.backupPath}`
               : "Threads already use this provider.",
             "Run: codex",
           ],

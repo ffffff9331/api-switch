@@ -318,6 +318,7 @@ describe("codex-switch", () => {
 
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, /Moved 2 thread\(s\) to provider: vayne/);
+    assert.match(result.stdout, /Updated 2 thread model\(s\) to: gpt-5\.5/);
     assert.match(result.stdout, /Updated 2 rollout file\(s\)/);
     const rows = spawnSync(
       "sqlite3",
@@ -325,9 +326,9 @@ describe("codex-switch", () => {
       { encoding: "utf8" },
     );
     assert.equal(rows.status, 0, rows.stderr);
-    assert.match(rows.stdout, /active-account\|gpt-5\.4\|vayne/);
+    assert.match(rows.stdout, /active-account\|gpt-5\.5\|vayne/);
     assert.match(rows.stdout, /active-relay\|gpt-5\.5\|vayne/);
-    assert.match(rows.stdout, /archived-account\|gpt-5\.4\|vayne/);
+    assert.match(rows.stdout, /archived-account\|gpt-5\.5\|vayne/);
     assert.equal(JSON.parse(fs.readFileSync(activeRollout, "utf8").split("\n")[0]).payload.model_provider, "vayne");
     assert.equal(JSON.parse(fs.readFileSync(archivedRollout, "utf8").split("\n")[0]).payload.model_provider, "vayne");
     assert.equal(fs.readdirSync(dir).filter((name) => name.startsWith("active.jsonl.codex-switch-")).length, 1);
@@ -637,12 +638,130 @@ describe("codex-switch", () => {
 
       assert.equal(response.status, 200, JSON.stringify(payload));
       assert.match(payload.details.join("\n"), /Moved 1 thread\(s\)/);
+      assert.match(payload.details.join("\n"), /updated 1 thread model\(s\) to 'gpt-5\.5'/i);
       const rows = spawnSync("sqlite3", [dbPath, "select model_provider from threads where id = 'web-active';"], {
         encoding: "utf8",
       });
       assert.equal(rows.status, 0, rows.stderr);
       assert.equal(rows.stdout.trim(), "vayne");
       assert.equal(JSON.parse(fs.readFileSync(rollout, "utf8").split("\n")[0]).payload.model_provider, "vayne");
+    } finally {
+      server.kill();
+    }
+  });
+
+  it("switching to a Claude profile migrates all history thread models", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-switch-"));
+    const setup = spawnSync(
+      process.execPath,
+      [
+        bin,
+        "setup",
+        "--codex-home",
+        dir,
+        "--name",
+        "claude",
+        "--base-url",
+        "https://api.vayne.cc.cd/v1",
+        "--model",
+        "claude-opus-4-6",
+      ],
+      { input: "sk-claude\n", encoding: "utf8" },
+    );
+    assert.equal(setup.status, 0, setup.stderr);
+
+    const dbPath = path.join(dir, "state_5.sqlite");
+    spawnSync(
+      "sqlite3",
+      [
+        dbPath,
+        [
+          "create table threads (id text primary key, archived integer default 0, model text, model_provider text, rollout_path text);",
+          "insert into threads (id, archived, model, model_provider, rollout_path) values ('old-gpt', 0, 'gpt-5.5', 'vayne', '');",
+          "insert into threads (id, archived, model, model_provider, rollout_path) values ('old-other-model', 0, 'gpt-5.4-mini', 'vayne', '');",
+          "insert into threads (id, archived, model, model_provider, rollout_path) values ('old-openai', 1, 'gpt-5.5', 'openai', '');",
+        ].join(" "),
+      ],
+      { encoding: "utf8" },
+    );
+
+    const result = spawnSync(
+      process.execPath,
+      [bin, "default", "--codex-home", dir, "--name", "claude"],
+      { encoding: "utf8" },
+    );
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /Updated 3 thread model\(s\) to: claude-opus-4-6/);
+    const rows = spawnSync(
+      "sqlite3",
+      [dbPath, "select id || '|' || model || '|' || model_provider from threads order by id;"],
+      { encoding: "utf8" },
+    );
+    assert.equal(rows.status, 0, rows.stderr);
+    assert.match(rows.stdout, /old-gpt\|claude-opus-4-6\|claude/);
+    assert.match(rows.stdout, /old-openai\|claude-opus-4-6\|claude/);
+    assert.match(rows.stdout, /old-other-model\|claude-opus-4-6\|claude/);
+  });
+
+  it("web switching to a Claude profile also migrates all history thread models", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-switch-"));
+    const setup = spawnSync(
+      process.execPath,
+      [
+        bin,
+        "setup",
+        "--codex-home",
+        dir,
+        "--name",
+        "claude",
+        "--base-url",
+        "https://api.vayne.cc.cd/v1",
+        "--model",
+        "claude-opus-4-6",
+      ],
+      { input: "sk-claude\n", encoding: "utf8" },
+    );
+    assert.equal(setup.status, 0, setup.stderr);
+
+    const dbPath = path.join(dir, "state_5.sqlite");
+    spawnSync(
+      "sqlite3",
+      [
+        dbPath,
+        [
+          "create table threads (id text primary key, archived integer default 0, model text, model_provider text, rollout_path text);",
+          "insert into threads (id, archived, model, model_provider, rollout_path) values ('web-old', 0, 'gpt-5.5', 'openai', '');",
+          "insert into threads (id, archived, model, model_provider, rollout_path) values ('web-other', 0, 'gpt-5.4-mini', 'openai', '');",
+        ].join(" "),
+      ],
+      { encoding: "utf8" },
+    );
+
+    const server = spawn(process.execPath, [bin, "web", "--codex-home", dir, "--host", "127.0.0.1", "--port", "0", "--no-open"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+
+    try {
+      const baseUrl = await waitForWebUrl(server);
+      const response = await fetch(`${baseUrl}/api/default`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: "claude", restartCodex: false }),
+      });
+      const payload = await response.json();
+
+      assert.equal(response.status, 200, JSON.stringify(payload));
+      assert.match(payload.details.join("\n"), /updated 2 thread model\(s\) to 'claude-opus-4-6'/i);
+      const rows = spawnSync(
+        "sqlite3",
+        [dbPath, "select id || '|' || model || '|' || model_provider from threads order by id;"],
+        { encoding: "utf8" },
+      );
+      assert.equal(rows.status, 0, rows.stderr);
+      assert.match(rows.stdout, /web-old\|claude-opus-4-6\|claude/);
+      assert.match(rows.stdout, /web-other\|claude-opus-4-6\|claude/);
     } finally {
       server.kill();
     }
