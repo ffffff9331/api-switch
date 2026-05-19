@@ -767,6 +767,71 @@ describe("codex-switch", () => {
     }
   });
 
+  it("rewrites rollout turn context models when switching profiles", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-switch-"));
+    const setup = spawnSync(
+      process.execPath,
+      [
+        bin,
+        "setup",
+        "--codex-home",
+        dir,
+        "--name",
+        "claude",
+        "--base-url",
+        "https://api.vayne.cc.cd/v1",
+        "--model",
+        "claude-opus-4-6",
+      ],
+      { input: "sk-claude\n", encoding: "utf8" },
+    );
+    assert.equal(setup.status, 0, setup.stderr);
+
+    const dbPath = path.join(dir, "state_5.sqlite");
+    const rollout = path.join(dir, "current-thread.jsonl");
+    fs.writeFileSync(
+      rollout,
+      [
+        JSON.stringify({ type: "session_meta", payload: { id: "current-thread", model_provider: "claude" } }),
+        JSON.stringify({
+          type: "turn_context",
+          payload: {
+            model: "gpt-5.5",
+            collaboration_mode: { settings: { model: "gpt-5.5", reasoning_effort: "medium" } },
+          },
+        }),
+        JSON.stringify({ type: "event_msg", payload: { type: "task_started", model: "gpt-5.5" } }),
+        JSON.stringify({ type: "response_item", payload: { type: "message", role: "user" } }),
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    spawnSync(
+      "sqlite3",
+      [
+        dbPath,
+        [
+          "create table threads (id text primary key, archived integer default 0, model text, model_provider text, rollout_path text);",
+          `insert into threads (id, archived, model, model_provider, rollout_path) values ('current-thread', 0, 'gpt-5.5', 'claude', '${rollout.replace(/'/g, "''")}');`,
+        ].join(" "),
+      ],
+      { encoding: "utf8" },
+    );
+
+    const result = spawnSync(
+      process.execPath,
+      [bin, "default", "--codex-home", dir, "--name", "claude"],
+      { encoding: "utf8" },
+    );
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /Updated 1 thread model\(s\) to: claude-opus-4-6/);
+    const lines = fs.readFileSync(rollout, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+    assert.equal(lines[1].payload.model, "claude-opus-4-6");
+    assert.equal(lines[1].payload.collaboration_mode.settings.model, "claude-opus-4-6");
+    assert.equal(lines[2].payload.model, "claude-opus-4-6");
+  });
+
   it("switches back to account login by clearing the profile key", () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-switch-"));
     const configPath = path.join(dir, "config.toml");

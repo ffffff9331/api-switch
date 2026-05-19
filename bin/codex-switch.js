@@ -332,6 +332,7 @@ function defaultCommand(args) {
     console.log(`Moved ${migration.changed} thread(s) to provider: ${providerId(args.name)}`);
     if (migration.modelChanged) console.log(`Updated ${migration.modelChanged} thread model(s) to: ${profile.model}`);
     console.log(`Updated ${migration.rolloutChanged} rollout file(s).`);
+    if (migration.rolloutModelChanged) console.log(`Updated ${migration.rolloutModelChanged} rollout model file(s) to: ${profile.model}`);
     if (migration.repairedRolloutPaths) console.log(`Repaired ${migration.repairedRolloutPaths} rollout path(s).`);
     console.log(`Backup: ${migration.backupPath}`);
   }
@@ -350,6 +351,7 @@ function accountCommand(args) {
   if (migration) {
     console.log(`Moved ${migration.changed} thread(s) to provider: openai`);
     console.log(`Updated ${migration.rolloutChanged} rollout file(s).`);
+    if (migration.rolloutModelChanged) console.log(`Updated ${migration.rolloutModelChanged} rollout model file(s).`);
     if (migration.repairedRolloutPaths) console.log(`Repaired ${migration.repairedRolloutPaths} rollout path(s).`);
     console.log(`Backup: ${migration.backupPath}`);
   }
@@ -521,6 +523,27 @@ function rewriteRolloutFirstLine(rolloutPath, firstLine, info, stamp) {
   fs.renameSync(tempPath, rolloutPath);
 }
 
+function rewriteRolloutJsonLines(rolloutPath, transformLine, stamp) {
+  if (!rolloutPath || !fs.existsSync(rolloutPath)) return false;
+  const original = fs.readFileSync(rolloutPath, "utf8");
+  const hasTrailingNewline = original.endsWith("\n");
+  const lines = original.split("\n");
+  if (hasTrailingNewline) lines.pop();
+
+  let changed = false;
+  const nextLines = lines.map((line) => {
+    const updated = transformLine(line);
+    if (updated !== line) changed = true;
+    return updated;
+  });
+  if (!changed) return false;
+
+  backupFile(rolloutPath, stamp);
+  const body = `${nextLines.join("\n")}${hasTrailingNewline ? "\n" : ""}`;
+  fs.writeFileSync(rolloutPath, body, { mode: 0o600 });
+  return true;
+}
+
 function updateRolloutProvider(rolloutPath, provider, stamp) {
   if (!rolloutPath || !fs.existsSync(rolloutPath)) return false;
   const info = readRolloutFirstLine(rolloutPath);
@@ -543,6 +566,41 @@ function updateRolloutProvider(rolloutPath, provider, stamp) {
   backupFile(rolloutPath, stamp);
   rewriteRolloutFirstLine(rolloutPath, JSON.stringify(entry), info, stamp);
   return true;
+}
+
+function updateRolloutModel(rolloutPath, model, stamp) {
+  if (!rolloutPath || !fs.existsSync(rolloutPath) || !model) return false;
+  return rewriteRolloutJsonLines(
+    rolloutPath,
+    (line) => {
+      if (!line.trim()) return line;
+      let entry;
+      try {
+        entry = JSON.parse(line);
+      } catch {
+        return line;
+      }
+
+      let changed = false;
+      if (entry.type === "turn_context" && entry.payload && entry.payload.model && entry.payload.model !== model) {
+        entry.payload.model = model;
+        if (entry.payload.collaboration_mode && entry.payload.collaboration_mode.settings && entry.payload.collaboration_mode.settings.model) {
+          entry.payload.collaboration_mode.settings.model = model;
+        }
+        changed = true;
+      }
+
+      if (entry.type === "event_msg" && entry.payload && entry.payload.type === "task_started" && entry.payload.model) {
+        if (entry.payload.model !== model) {
+          entry.payload.model = model;
+          changed = true;
+        }
+      }
+
+      return changed ? JSON.stringify(entry) : line;
+    },
+    stamp,
+  );
 }
 
 function originalRolloutPath(rolloutPath) {
@@ -613,8 +671,11 @@ function migrateThreads(codexHome, provider, options = {}) {
     }
   }
   const rolloutChanged = rolloutRows.filter((row) => updateRolloutProvider(row.rolloutPath, provider, stamp)).length;
+  const rolloutModelChanged = shouldMigrateModel
+    ? rolloutRows.filter((row) => updateRolloutModel(row.rolloutPath, toModel, stamp)).length
+    : 0;
 
-  if (!changed && !modelChanged && !rolloutChanged && repairs.length === 0) return null;
+  if (!changed && !modelChanged && !rolloutChanged && !rolloutModelChanged && repairs.length === 0) return null;
 
   const backupPath = `${stateDb}.codex-switch-${stamp}.bak`;
   fs.copyFileSync(stateDb, backupPath);
@@ -647,7 +708,14 @@ function migrateThreads(codexHome, provider, options = {}) {
       ].join(" "),
     );
   }
-  return { changed, modelChanged, backupPath, rolloutChanged, repairedRolloutPaths: repairs.length };
+  return {
+    changed,
+    modelChanged,
+    backupPath,
+    rolloutChanged,
+    rolloutModelChanged,
+    repairedRolloutPaths: repairs.length,
+  };
 }
 
 function threadModelCommand(args) {
@@ -1905,7 +1973,7 @@ function startWeb(args) {
           details: [
             `Config: ${path.join(codexHome, "config.toml")}`,
             migration
-              ? `Moved ${migration.changed} thread(s), updated ${migration.modelChanged} thread model(s) to '${profile.model}', updated ${migration.rolloutChanged} rollout file(s), and repaired ${migration.repairedRolloutPaths} rollout path(s) to provider '${providerId(payload.name)}'. Backup: ${migration.backupPath}`
+              ? `Moved ${migration.changed} thread(s), updated ${migration.modelChanged} thread model(s) to '${profile.model}', updated ${migration.rolloutChanged} rollout provider file(s), updated ${migration.rolloutModelChanged} rollout model file(s), and repaired ${migration.repairedRolloutPaths} rollout path(s) to provider '${providerId(payload.name)}'. Backup: ${migration.backupPath}`
               : "Threads already use this provider.",
             "Run: codex",
           ],
