@@ -234,6 +234,17 @@ API_SWITCH_DEBUG_PROXY=1 api-switch proxy
 
 `CODEX_SWITCH_DEBUG_PROXY=1` is still accepted as a compatibility alias.
 
+## Roadmap
+
+API Switch already focuses on protocol correctness for Codex and Claude Code. The next product gaps are:
+
+- **Closer Claude parity.** Claude is bridged through chat completions today; the goal is to cover more complex Responses edge cases without pretending the bridge is native.
+- **Profile capability detection.** Detect whether each relay supports `/v1/responses`, `/v1/chat/completions`, `/v1/messages`, streaming, tools, and vision before choosing a route.
+- **More guided Web UI.** Add first-run guidance, clearer connection state, service status, and actionable recovery steps for common setup errors.
+- **Passive request visibility.** Show real proxy requests that already happened without running background model diagnostics or spending extra tokens.
+- **Smarter model routing.** Make client-specific model mapping, model-family defaults, bridge selection, and fallback behavior easier to see and configure.
+- **Smoother distribution.** Move beyond GitHub install toward npm/Homebrew-style install and update flows.
+
 ## Compatibility Notes
 
 - The install repository is still named `codex-switch`, but the product and command are `api-switch`.
@@ -381,6 +392,17 @@ api-switch service-install
 api-switch service-status
 api-switch service-uninstall
 ```
+
+## 后续路线
+
+API Switch 当前优先解决 Codex 和 Claude Code 的协议正确性。下一步要补的产品能力是：
+
+- **更接近原生的 Claude 体验。** 目前 Claude 通过 chat completions 桥接，后续要覆盖更多复杂 Responses 场景，但不会把桥接伪装成原生。
+- **中转配置能力探测。** 自动识别每个中转是否支持 `/v1/responses`、`/v1/chat/completions`、`/v1/messages`、流式、工具和视觉输入。
+- **更清晰的 Web 引导。** 增加首次使用引导、连接状态、常驻服务状态，以及常见错误的恢复建议。
+- **不额外耗 token 的请求可视化。** 只展示真实发生过的代理请求，不在后台主动跑模型诊断。
+- **更智能的模型路由。** 让按客户端映射、按模型族默认策略、桥接选择和 fallback 行为更容易查看和配置。
+- **更顺滑的安装更新。** 后续从 GitHub 安装继续推进到 npm/Homebrew 风格的安装和更新流程。
 
 ## 兼容说明
 
