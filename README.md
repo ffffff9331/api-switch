@@ -1,6 +1,8 @@
 # API Switch
 
-API Switch is a local Web UI, CLI, and proxy gateway for using relay APIs with AI coding clients.
+Use your own relay models in Codex Desktop and Claude Code without giving up the native coding-agent experience.
+
+API Switch is a local Web UI, CLI, and protocol router for connecting coding clients to OpenAI, Claude, Gemini, Grok, DeepSeek, and self-hosted models behind a relay API. It keeps the client-facing protocol stable, stores real API keys locally, and only bridges the model families that actually need bridging.
 
 Supported clients:
 
@@ -40,11 +42,13 @@ api-switch web
 
 ## Release Highlights
 
-- Default routing preserves native `/v1/responses` for GPT, Gemini, Grok, DeepSeek, and other non-Claude models.
-- Only `claude-*` models use the bridge path: `/v1/responses` or `/v1/messages` to `/v1/chat/completions`, then back to the client protocol.
-- Streaming Responses are passed through unchanged for non-Claude models, so Codex long tasks and tool events are not rewritten by the proxy.
-- Claude streaming bridge now handles common SSE frame formats and keeps text/tool-call events flowing back to Codex and Claude Code.
-- The Web UI is configuration-first: saved profiles, model loading, access testing, client switching, and advanced model-name mapping. It does not run background model diagnostics on page load.
+This release focuses on one thing: making relay models feel native inside Codex and Claude Code.
+
+- **Native long-task path by default.** GPT, Gemini, Grok, DeepSeek, and other non-Claude models stay on native `/v1/responses`, so Codex streaming, tools, and long-running work are not rewritten by API Switch.
+- **Claude works where native Responses does not.** `claude-*` is automatically bridged through `/v1/chat/completions` and wrapped back into Responses or Anthropic Messages for the client.
+- **No surprise token spend from the Web UI.** The page reads local configuration only. Upstream calls happen only when you click `Load Models` or `Test Access`.
+- **One switchboard for coding clients.** Save a relay once, then attach it to Codex, Claude Code, or advanced model-name routes from the same local UI.
+- **Safer by design.** Real relay keys stay in local key files; Codex and Claude Code only receive the local proxy token.
 
 ## How It Works
 
@@ -240,7 +244,9 @@ API_SWITCH_DEBUG_PROXY=1 api-switch proxy
 
 # API Switch 中文说明
 
-API Switch 是一个本地 Web UI、命令行工具和代理网关，用来让 Codex Desktop、Claude Code 等编程客户端使用你的中转 API。
+让 Codex Desktop 和 Claude Code 用上你的中转站模型，同时尽量保留原生编程 Agent 的长任务、工具调用和流式体验。
+
+API Switch 是一个本地 Web UI、命令行工具和协议路由层，用来把 Codex Desktop、Claude Code 接到中转站里的 OpenAI、Claude、Gemini、Grok、DeepSeek 和自建模型。它稳定客户端协议，本地保存真实 API Key，只对确实需要转换的模型族做桥接。
 
 当前支持：
 
@@ -271,11 +277,13 @@ http://127.0.0.1:18600
 
 ## 这版更新
 
-- 默认所有非 Claude 模型都走原生 `/v1/responses`，包括 GPT、Gemini、Grok、DeepSeek 和其他自建模型。
-- 只有 `claude-*` 走桥接：`/v1/responses` 或 `/v1/messages` 转 `/v1/chat/completions`，再包装回客户端需要的协议。
-- 非 Claude 的流式 Responses 原样透传，避免 Codex 长任务、工具事件被代理层改短或改坏。
-- Claude 流式桥接增强了 SSE 解析，兼容常见换行格式，并保留文本和工具调用事件。
-- Web UI 不再自动跑模型诊断；只有点击“读取模型”或“检测接入”才会请求上游。
+这一版只解决一个核心问题：让中转站模型在 Codex 和 Claude Code 里尽量像原生模型一样工作。
+
+- **默认保留原生长任务链路。** GPT、Gemini、Grok、DeepSeek 和其他非 Claude 模型都原生走 `/v1/responses`，Codex 的流式输出、工具调用、长任务不会被 API Switch 重写。
+- **Claude 自动桥接。** `claude-*` 会自动走 `/v1/chat/completions`，再包装回 Codex 需要的 Responses 或 Claude Code 需要的 Messages。
+- **Web UI 不偷跑消耗。** 页面只读本地配置；只有点击“读取模型”或“检测接入”才会请求上游。
+- **一个本地开关管理多个客户端。** 同一个中转配置，可以在 Web UI 里切给 Codex、Claude Code，也可以做高级模型名映射。
+- **真实密钥不进客户端配置。** Codex 和 Claude Code 只拿到本地代理 token，真实中转 API Key 留在本地 key file。
 
 ## 基本使用
 
