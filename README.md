@@ -9,14 +9,14 @@ Supported clients:
 - Codex Desktop through its built-in OpenAI API mode and `openai_base_url`.
 - Claude Code through `ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN`.
 
-The public product name and command are `api-switch`. The old `codex-switch` command remains as a compatibility alias for existing installs.
+The public product name, repository, package, and command are all `api-switch`.
 
 ## Install
 
 This project is currently distributed from GitHub.
 
 ```bash
-npm install -g github:ffffff9331/codex-switch
+npm install -g github:ffffff9331/api-switch
 ```
 
 Start the Web UI:
@@ -34,8 +34,8 @@ http://127.0.0.1:18600
 From a local clone:
 
 ```bash
-git clone https://github.com/ffffff9331/codex-switch.git
-cd codex-switch
+git clone https://github.com/ffffff9331/api-switch.git
+cd api-switch
 npm install -g .
 api-switch web
 ```
@@ -217,13 +217,13 @@ api-switch service-uninstall
 
 ## Files
 
-Internal storage paths keep the legacy directory name for compatibility with existing users:
+Internal storage paths use the API Switch directory:
 
 ```text
-~/.codex/codex-switch/profiles.json
-~/.codex/codex-switch/routes.json
-~/.codex/codex-switch/proxy-settings.json
-~/.codex/codex-switch/proxy-logs/
+~/.codex/api-switch/profiles.json
+~/.codex/api-switch/routes.json
+~/.codex/api-switch/proxy-settings.json
+~/.codex/api-switch/proxy-logs/
 ```
 
 Enable debug logs:
@@ -231,8 +231,6 @@ Enable debug logs:
 ```bash
 API_SWITCH_DEBUG_PROXY=1 api-switch proxy
 ```
-
-`CODEX_SWITCH_DEBUG_PROXY=1` is still accepted as a compatibility alias.
 
 ## Roadmap
 
@@ -247,9 +245,8 @@ API Switch already focuses on protocol correctness for Codex and Claude Code. Th
 
 ## Compatibility Notes
 
-- The install repository is still named `codex-switch`, but the product and command are `api-switch`.
-- `codex-switch` remains as a CLI alias to avoid breaking existing installs.
-- Internal storage under `~/.codex/codex-switch/` is preserved to keep existing user profiles and migrations working.
+- Repository, package name, product name, and command are all `api-switch`.
+- Internal storage lives under `~/.codex/api-switch/`.
 
 ---
 
@@ -264,14 +261,14 @@ API Switch 是一个本地 Web UI、命令行工具和协议路由层，用来�
 - Codex Desktop：通过 Codex 内置 OpenAI API 模式和 `openai_base_url` 接入。
 - Claude Code：通过 `ANTHROPIC_BASE_URL` 和 `ANTHROPIC_AUTH_TOKEN` 接入。
 
-公开产品名和主命令统一为 `api-switch`。旧的 `codex-switch` 命令只作为兼容别名保留。
+公开产品名、仓库名、包名和主命令统一为 `api-switch`。
 
 ## 安装
 
 目前从 GitHub 安装：
 
 ```bash
-npm install -g github:ffffff9331/codex-switch
+npm install -g github:ffffff9331/api-switch
 ```
 
 启动 Web UI：
@@ -406,7 +403,6 @@ API Switch 当前优先解决 Codex 和 Claude Code 的协议正确性。下一�
 
 ## 兼容说明
 
-- 仓库名暂时仍是 `codex-switch`，产品名和主命令是 `api-switch`。
-- `codex-switch` 命令作为旧版兼容别名继续可用。
-- `~/.codex/codex-switch/` 目录暂时保留，避免破坏已有用户配置。
-- 推荐使用 `API_SWITCH_DEBUG_PROXY=1` 开启调试日志；旧的 `CODEX_SWITCH_DEBUG_PROXY=1` 仍然兼容。
+- 仓库名、包名、产品名和命令统一为 `api-switch`。
+- 内部配置目录为 `~/.codex/api-switch/`。
+- 推荐使用 `API_SWITCH_DEBUG_PROXY=1` 开启调试日志。

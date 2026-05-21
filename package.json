@@ -3,8 +3,7 @@
   "version": "0.1.0",
   "description": "Local API switch gateway for Codex and Claude Code relay profiles.",
   "bin": {
-    "api-switch": "bin/api-switch.js",
-    "codex-switch": "bin/api-switch.js"
+    "api-switch": "bin/api-switch.js"
   },
   "files": [
     "bin/",

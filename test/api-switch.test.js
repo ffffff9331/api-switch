@@ -207,7 +207,7 @@ describe("api-switch", () => {
   });
 
   it("writes a relay profile outside Codex config", () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-switch-"));
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "api-switch-"));
     const result = spawnSync(
       process.execPath,
       [
@@ -230,19 +230,19 @@ describe("api-switch", () => {
 
     assert.equal(result.status, 0, result.stderr);
     assert.equal(fs.existsSync(path.join(dir, "config.toml")), false);
-    const store = JSON.parse(fs.readFileSync(path.join(dir, "codex-switch", "profiles.json"), "utf8"));
+    const store = JSON.parse(fs.readFileSync(path.join(dir, "api-switch", "profiles.json"), "utf8"));
     assert.equal(store.profiles.vayne.baseUrl, "https://api.vayne.cc.cd/v1");
     assert.equal(store.profiles.vayne.model, "gpt-5.5");
     assert.equal(store.profiles.vayne.keyFile, path.join(dir, "vayne_api_key"));
     assert.doesNotMatch(JSON.stringify(store), /sk-test/);
     assert.equal(fs.readFileSync(path.join(dir, "vayne_api_key"), "utf8"), "sk-test\n");
-    const catalog = JSON.parse(fs.readFileSync(path.join(dir, "codex-switch", "vayne_models.json"), "utf8"));
+    const catalog = JSON.parse(fs.readFileSync(path.join(dir, "api-switch", "vayne_models.json"), "utf8"));
     assert.equal(catalog.models[0].slug, "gpt-5.5");
     assert.equal(catalog.models[0].visibility, "list");
   });
 
   it("removes a relay profile from the API Switch profile store", () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-switch-"));
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "api-switch-"));
     spawnSync(
       process.execPath,
       [
@@ -269,12 +269,12 @@ describe("api-switch", () => {
     });
 
     assert.equal(result.status, 0, result.stderr);
-    const store = JSON.parse(fs.readFileSync(path.join(dir, "codex-switch", "profiles.json"), "utf8"));
+    const store = JSON.parse(fs.readFileSync(path.join(dir, "api-switch", "profiles.json"), "utf8"));
     assert.equal(store.profiles.vayne, undefined);
   });
 
   it("can delete the local key file when removing a profile", () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-switch-"));
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "api-switch-"));
     spawnSync(
       process.execPath,
       [
@@ -303,7 +303,7 @@ describe("api-switch", () => {
   });
 
   it("does not switch Codex to proxy mode when the target API key is missing", () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-switch-"));
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "api-switch-"));
     const setup = spawnSync(
       process.execPath,
       [
@@ -333,7 +333,7 @@ describe("api-switch", () => {
   });
 
   it("rolls Codex config and auth back if history migration fails during proxy switch", () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-switch-"));
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "api-switch-"));
     fs.writeFileSync(path.join(dir, "auth.json"), `${JSON.stringify({ auth_mode: "chatgpt", tokens: { id: "account" } }, null, 2)}\n`);
     fs.writeFileSync(path.join(dir, "config.toml"), 'model = "gpt-5.5"\n');
     fs.writeFileSync(path.join(dir, "state_5.sqlite"), "not a sqlite database");
@@ -363,11 +363,11 @@ describe("api-switch", () => {
     const auth = JSON.parse(fs.readFileSync(path.join(dir, "auth.json"), "utf8"));
     assert.equal(auth.auth_mode, "chatgpt");
     assert.equal(auth.tokens.id, "account");
-    assert.equal(fs.existsSync(path.join(dir, "codex-switch", "proxy-settings.json")), false);
+    assert.equal(fs.existsSync(path.join(dir, "api-switch", "proxy-settings.json")), false);
   });
 
   it("can store multiple relay profiles", () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-switch-"));
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "api-switch-"));
     const first = spawnSync(
       process.execPath,
       [
@@ -403,14 +403,14 @@ describe("api-switch", () => {
 
     assert.equal(first.status, 0, first.stderr);
     assert.equal(second.status, 0, second.stderr);
-    const store = JSON.parse(fs.readFileSync(path.join(dir, "codex-switch", "profiles.json"), "utf8"));
+    const store = JSON.parse(fs.readFileSync(path.join(dir, "api-switch", "profiles.json"), "utf8"));
     assert.equal(store.profiles.vayne.baseUrl, "https://api.vayne.cc.cd/v1");
     assert.equal(store.profiles.backup.baseUrl, "https://relay.example.com/v1");
     assert.doesNotMatch(JSON.stringify(store), /sk-one|sk-two/);
   });
 
   it("updates the model for an existing relay profile without replacing the key", () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-switch-"));
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "api-switch-"));
     const setup = spawnSync(
       process.execPath,
       [
@@ -445,11 +445,11 @@ describe("api-switch", () => {
     );
 
     assert.equal(result.status, 0, result.stderr);
-    const store = JSON.parse(fs.readFileSync(path.join(dir, "codex-switch", "profiles.json"), "utf8"));
+    const store = JSON.parse(fs.readFileSync(path.join(dir, "api-switch", "profiles.json"), "utf8"));
     assert.equal(store.profiles.vayne.model, "gpt-5.4");
     assert.equal(store.profiles.vayne.baseUrl, "https://api.vayne.cc.cd/v1");
     assert.equal(fs.readFileSync(path.join(dir, "vayne_api_key"), "utf8"), "sk-one\n");
-    const catalog = JSON.parse(fs.readFileSync(path.join(dir, "codex-switch", "vayne_models.json"), "utf8"));
+    const catalog = JSON.parse(fs.readFileSync(path.join(dir, "api-switch", "vayne_models.json"), "utf8"));
     assert.deepEqual(
       catalog.models.map((model) => model.slug).sort(),
       ["gpt-5.4", "gpt-5.5"],
@@ -457,7 +457,7 @@ describe("api-switch", () => {
   });
 
   it("sets proxy mode without writing a default Codex profile key", () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-switch-"));
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "api-switch-"));
     const setup = spawnSync(
       process.execPath,
       [
@@ -500,15 +500,67 @@ describe("api-switch", () => {
     assert.match(config, /forced_login_method = "api"/);
     const auth = JSON.parse(fs.readFileSync(path.join(dir, "auth.json"), "utf8"));
     assert.equal(auth.OPENAI_API_KEY, "api-switch");
-    const proxySettings = JSON.parse(fs.readFileSync(path.join(dir, "codex-switch", "proxy-settings.json"), "utf8"));
+    const proxySettings = JSON.parse(fs.readFileSync(path.join(dir, "api-switch", "proxy-settings.json"), "utf8"));
     assert.equal(proxySettings.clients.codex.targetProfile, "vayne");
     assert.equal(proxySettings.clients["claude-code"].targetProfile, "");
   });
 
-  it("imports a legacy Codex config profile before cleaning old blocks", () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-switch-"));
+  it("imports an API Switch config profile before cleaning managed blocks", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "api-switch-"));
+    fs.mkdirSync(path.join(dir, "api-switch"), { recursive: true });
+    fs.writeFileSync(path.join(dir, "vayne_api_key"), "sk-one\n", { mode: 0o600 });
+    fs.writeFileSync(
+      path.join(dir, "config.toml"),
+      [
+        "# >>> api-switch:vayne",
+        "[profiles.vayne]",
+        'model_provider = "vayne"',
+        'model = "gpt-5.5"',
+        `model_catalog_json = "${path.join(dir, "api-switch", "vayne_models.json").replace(/\\/g, "\\\\")}"`,
+        "",
+        "[model_providers.vayne]",
+        'name = "vayne"',
+        'base_url = "https://api.vayne.cc.cd/v1"',
+        'wire_api = "responses"',
+        'auth.command = "cat"',
+        `auth.args = ["${path.join(dir, "vayne_api_key").replace(/\\/g, "\\\\")}"]`,
+        "# <<< api-switch:vayne",
+        "",
+      ].join("\n"),
+    );
+
+    const result = spawnSync(process.execPath, [bin, "default", "--codex-home", dir, "--name", "vayne"], {
+      encoding: "utf8",
+      env: spawnEnv,
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+    const config = fs.readFileSync(path.join(dir, "config.toml"), "utf8");
+    assert.doesNotMatch(config, /# >>> api-switch:vayne/);
+    assert.match(config, /openai_base_url = "http:\/\/127\.0\.0\.1:18600\/v1"/);
+    const store = JSON.parse(fs.readFileSync(path.join(dir, "api-switch", "profiles.json"), "utf8"));
+    assert.equal(store.profiles.vayne.baseUrl, "https://api.vayne.cc.cd/v1");
+    assert.equal(store.profiles.vayne.model, "gpt-5.5");
+    assert.equal(store.profiles.vayne.importedFrom, "legacy-config");
+    const proxySettings = JSON.parse(fs.readFileSync(path.join(dir, "api-switch", "proxy-settings.json"), "utf8"));
+    assert.equal(proxySettings.clients.codex.targetProfile, "vayne");
+  });
+
+  it("migrates legacy storage and managed markers to the API Switch brand", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "api-switch-"));
     fs.mkdirSync(path.join(dir, "codex-switch"), { recursive: true });
     fs.writeFileSync(path.join(dir, "vayne_api_key"), "sk-one\n", { mode: 0o600 });
+    fs.writeFileSync(path.join(dir, "codex-switch", "profiles.json"), JSON.stringify({
+      version: 1,
+      profiles: {
+        vayne: {
+          name: "vayne",
+          baseUrl: "https://api.vayne.cc.cd/v1",
+          model: "gpt-5.5",
+          keyFile: path.join(dir, "vayne_api_key"),
+        },
+      },
+    }));
     fs.writeFileSync(
       path.join(dir, "config.toml"),
       [
@@ -516,8 +568,6 @@ describe("api-switch", () => {
         "[profiles.vayne]",
         'model_provider = "vayne"',
         'model = "gpt-5.5"',
-        `model_catalog_json = "${path.join(dir, "codex-switch", "vayne_models.json").replace(/\\/g, "\\\\")}"`,
-        "",
         "[model_providers.vayne]",
         'name = "vayne"',
         'base_url = "https://api.vayne.cc.cd/v1"',
@@ -535,19 +585,15 @@ describe("api-switch", () => {
     });
 
     assert.equal(result.status, 0, result.stderr);
+    assert.equal(fs.existsSync(path.join(dir, "api-switch", "profiles.json")), true);
+    assert.equal(fs.existsSync(path.join(dir, "api-switch", "proxy-settings.json")), true);
     const config = fs.readFileSync(path.join(dir, "config.toml"), "utf8");
-    assert.doesNotMatch(config, /# >>> codex-switch:vayne/);
+    assert.doesNotMatch(config, /codex-switch/);
     assert.match(config, /openai_base_url = "http:\/\/127\.0\.0\.1:18600\/v1"/);
-    const store = JSON.parse(fs.readFileSync(path.join(dir, "codex-switch", "profiles.json"), "utf8"));
-    assert.equal(store.profiles.vayne.baseUrl, "https://api.vayne.cc.cd/v1");
-    assert.equal(store.profiles.vayne.model, "gpt-5.5");
-    assert.equal(store.profiles.vayne.importedFrom, "legacy-config");
-    const proxySettings = JSON.parse(fs.readFileSync(path.join(dir, "codex-switch", "proxy-settings.json"), "utf8"));
-    assert.equal(proxySettings.clients.codex.targetProfile, "vayne");
   });
 
   it("keeps threads on openai provider and updates models for the selected proxy target", () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-switch-"));
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "api-switch-"));
     const setup = spawnSync(
       process.execPath,
       [
@@ -612,13 +658,13 @@ describe("api-switch", () => {
     assert.match(rows.stdout, /archived-account\|gpt-5\.5\|openai/);
     assert.equal(JSON.parse(fs.readFileSync(activeRollout, "utf8").split("\n")[0]).payload.model_provider, "openai");
     assert.equal(JSON.parse(fs.readFileSync(archivedRollout, "utf8").split("\n")[0]).payload.model_provider, "openai");
-    assert.equal(fs.readdirSync(dir).filter((name) => name.startsWith("active.jsonl.codex-switch-")).length, 0);
-    assert.equal(fs.readdirSync(dir).filter((name) => name.startsWith("archived.jsonl.codex-switch-")).length, 0);
-    assert.equal(fs.readdirSync(dir).filter((name) => name.startsWith("state_5.sqlite.codex-switch-")).length, 1);
+    assert.equal(fs.readdirSync(dir).filter((name) => name.startsWith("active.jsonl.api-switch-")).length, 0);
+    assert.equal(fs.readdirSync(dir).filter((name) => name.startsWith("archived.jsonl.api-switch-")).length, 0);
+    assert.equal(fs.readdirSync(dir).filter((name) => name.startsWith("state_5.sqlite.api-switch-")).length, 1);
   });
 
   it("preserves Codex workspace and git metadata while switching to proxy mode", () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-switch-"));
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "api-switch-"));
     const setup = spawnSync(
       process.execPath,
       [
@@ -667,7 +713,7 @@ describe("api-switch", () => {
   });
 
   it("repairs stale rollout metadata even when database threads already use the provider", () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-switch-"));
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "api-switch-"));
     const setup = spawnSync(
       process.execPath,
       [
@@ -716,7 +762,7 @@ describe("api-switch", () => {
   });
 
   it("updates rollout metadata without reading the whole rollout into memory", () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-switch-"));
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "api-switch-"));
     const setup = spawnSync(
       process.execPath,
       [
@@ -780,8 +826,8 @@ describe("api-switch", () => {
     assert.equal(fs.readFileSync(rollout, "utf8").endsWith(tailMarker), true);
   });
 
-  it("restores rollout paths that accidentally point at codex-switch backup files", () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-switch-"));
+  it("restores rollout paths that accidentally point at api-switch backup files", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "api-switch-"));
     const setup = spawnSync(
       process.execPath,
       [
@@ -802,7 +848,7 @@ describe("api-switch", () => {
 
     const dbPath = path.join(dir, "state_5.sqlite");
     const rollout = path.join(dir, "restored.jsonl");
-    const backupRollout = `${rollout}.codex-switch-20260514012055.bak`;
+    const backupRollout = `${rollout}.api-switch-20260514012055.bak`;
     fs.writeFileSync(
       backupRollout,
       `${JSON.stringify({ type: "session_meta", payload: { id: "restored", model_provider: "openai" } })}\n`,
@@ -839,7 +885,7 @@ describe("api-switch", () => {
   });
 
   it("lists account and relay profiles", () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-switch-"));
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "api-switch-"));
     const setup = spawnSync(
       process.execPath,
       [
@@ -872,7 +918,7 @@ describe("api-switch", () => {
   });
 
   it("keeps account provider metadata when using proxy mode", () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-switch-"));
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "api-switch-"));
     const setup = spawnSync(
       process.execPath,
       [
@@ -920,7 +966,7 @@ describe("api-switch", () => {
   });
 
   it("web switching migrates chat history even when restart is not requested", async () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-switch-"));
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "api-switch-"));
     const setup = spawnSync(
       process.execPath,
       [
@@ -989,7 +1035,7 @@ describe("api-switch", () => {
       const auth = JSON.parse(fs.readFileSync(path.join(dir, "auth.json"), "utf8"));
       assert.equal(auth.auth_mode, "apikey");
       assert.equal(auth.OPENAI_API_KEY, "api-switch");
-      const proxySettings = JSON.parse(fs.readFileSync(path.join(dir, "codex-switch", "proxy-settings.json"), "utf8"));
+      const proxySettings = JSON.parse(fs.readFileSync(path.join(dir, "api-switch", "proxy-settings.json"), "utf8"));
       assert.equal(proxySettings.clients.codex.targetProfile, "vayne");
       assert.equal(proxySettings.enabled, true);
     } finally {
@@ -998,7 +1044,7 @@ describe("api-switch", () => {
   });
 
   it("switching to a Claude profile migrates all history thread models", () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-switch-"));
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "api-switch-"));
     const setup = spawnSync(
       process.execPath,
       [
@@ -1052,7 +1098,7 @@ describe("api-switch", () => {
   });
 
   it("web switching to a Claude profile also migrates all history thread models", async () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-switch-"));
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "api-switch-"));
     const setup = spawnSync(
       process.execPath,
       [
@@ -1109,7 +1155,7 @@ describe("api-switch", () => {
       assert.equal(rows.status, 0, rows.stderr);
       assert.match(rows.stdout, /web-old\|claude-opus-4-6\|openai/);
       assert.match(rows.stdout, /web-other\|claude-opus-4-6\|openai/);
-      const proxySettings = JSON.parse(fs.readFileSync(path.join(dir, "codex-switch", "proxy-settings.json"), "utf8"));
+      const proxySettings = JSON.parse(fs.readFileSync(path.join(dir, "api-switch", "proxy-settings.json"), "utf8"));
       assert.equal(proxySettings.clients.codex.targetProfile, "claude");
     } finally {
       server.kill();
@@ -1117,7 +1163,7 @@ describe("api-switch", () => {
   });
 
   it("web account mode restores account auth after proxy mode", async () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-switch-"));
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "api-switch-"));
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(path.join(dir, "auth.json"), `${JSON.stringify({ auth_mode: "chatgpt", tokens: { id: "account" } }, null, 2)}\n`);
     const setup = spawnSync(
@@ -1182,9 +1228,9 @@ describe("api-switch", () => {
   });
 
   it("refreshes stale account auth backup before switching to proxy mode", () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-switch-"));
-    fs.mkdirSync(path.join(dir, "codex-switch"), { recursive: true });
-    fs.writeFileSync(path.join(dir, "codex-switch", "account-auth.backup.json"), `${JSON.stringify({ auth_mode: "chatgpt", tokens: { id: "old-account" } }, null, 2)}\n`);
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "api-switch-"));
+    fs.mkdirSync(path.join(dir, "api-switch"), { recursive: true });
+    fs.writeFileSync(path.join(dir, "api-switch", "account-auth.backup.json"), `${JSON.stringify({ auth_mode: "chatgpt", tokens: { id: "old-account" } }, null, 2)}\n`);
     fs.writeFileSync(path.join(dir, "auth.json"), `${JSON.stringify({ auth_mode: "chatgpt", tokens: { id: "new-account" } }, null, 2)}\n`);
     const setup = spawnSync(process.execPath, [bin, "setup", "--codex-home", dir, "--name", "vayne", "--base-url", "https://api.vayne.cc.cd/v1", "--model", "gpt-5.5"], {
       input: "sk-one\n",
@@ -1202,7 +1248,7 @@ describe("api-switch", () => {
   });
 
   it("rewrites rollout turn context models when switching profiles", () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-switch-"));
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "api-switch-"));
     const setup = spawnSync(
       process.execPath,
       [
@@ -1267,7 +1313,7 @@ describe("api-switch", () => {
   });
 
   it("switches back to account login by clearing the profile key", () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-switch-"));
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "api-switch-"));
     const configPath = path.join(dir, "config.toml");
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(configPath, 'profile = "vayne"\nmodel = "gpt-5.5"\n');
@@ -1310,12 +1356,12 @@ describe("api-switch", () => {
     assert.match(rows.stdout, /active-relay\|gpt-5\.5\|openai/);
     assert.match(rows.stdout, /archived-relay\|gpt-5\.5\|openai/);
     assert.equal(JSON.parse(fs.readFileSync(activeRollout, "utf8").split("\n")[0]).payload.model_provider, "openai");
-    const proxySettings = JSON.parse(fs.readFileSync(path.join(dir, "codex-switch", "proxy-settings.json"), "utf8"));
+    const proxySettings = JSON.parse(fs.readFileSync(path.join(dir, "api-switch", "proxy-settings.json"), "utf8"));
     assert.equal(proxySettings.clients.codex.targetProfile, "");
   });
 
   it("updates the latest desktop thread model in the state database", () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-switch-"));
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "api-switch-"));
     const dbPath = path.join(dir, "state_5.sqlite");
     spawnSync(
       "sqlite3",
@@ -1408,7 +1454,7 @@ describe("api-switch", () => {
   });
 
   it("reuses an already-running API Switch web server", async () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-switch-"));
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "api-switch-"));
     const server = spawn(process.execPath, [bin, "web", "--codex-home", dir, "--host", "127.0.0.1", "--port", "0", "--no-open"], {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
@@ -1430,7 +1476,7 @@ describe("api-switch", () => {
   });
 
   it("starts a local proxy that exposes health, models, and responses", async () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-switch-"));
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "api-switch-"));
     const upstream = http.createServer(async (req, res) => {
       if (req.method === "GET" && req.url === "/v1/models") {
         res.writeHead(200, { "content-type": "application/json" });
@@ -1540,8 +1586,8 @@ describe("api-switch", () => {
     const keyFile = path.join(dir, "vayne_api_key");
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(keyFile, "sk-test\n", { mode: 0o600 });
-    fs.mkdirSync(path.join(dir, "codex-switch"), { recursive: true });
-    fs.writeFileSync(path.join(dir, "codex-switch", "profiles.json"), JSON.stringify({
+    fs.mkdirSync(path.join(dir, "api-switch"), { recursive: true });
+    fs.writeFileSync(path.join(dir, "api-switch", "profiles.json"), JSON.stringify({
       version: 1,
       profiles: {
         vayne: {
@@ -1553,7 +1599,7 @@ describe("api-switch", () => {
         },
       },
     }));
-    fs.writeFileSync(path.join(dir, "codex-switch", "proxy-settings.json"), JSON.stringify({
+    fs.writeFileSync(path.join(dir, "api-switch", "proxy-settings.json"), JSON.stringify({
       enabled: true,
       clients: {
         codex: { targetProfile: "vayne" },
@@ -1625,9 +1671,9 @@ describe("api-switch", () => {
     await new Promise((resolve) => upstream.listen(0, "127.0.0.1", resolve));
 
     const keyFile = path.join(dir, "vayne_api_key");
-    fs.mkdirSync(path.join(dir, "codex-switch"), { recursive: true });
+    fs.mkdirSync(path.join(dir, "api-switch"), { recursive: true });
     fs.writeFileSync(keyFile, "sk-test\n", { mode: 0o600 });
-    fs.writeFileSync(path.join(dir, "codex-switch", "profiles.json"), JSON.stringify({
+    fs.writeFileSync(path.join(dir, "api-switch", "profiles.json"), JSON.stringify({
       version: 1,
       profiles: {
         vayne: {
@@ -1638,7 +1684,7 @@ describe("api-switch", () => {
         },
       },
     }));
-    fs.writeFileSync(path.join(dir, "codex-switch", "proxy-settings.json"), JSON.stringify({
+    fs.writeFileSync(path.join(dir, "api-switch", "proxy-settings.json"), JSON.stringify({
       enabled: true,
       clients: { codex: { targetProfile: "vayne" }, "claude-code": { targetProfile: "" } },
     }));
@@ -1693,9 +1739,9 @@ describe("api-switch", () => {
     await new Promise((resolve) => upstream.listen(0, "127.0.0.1", resolve));
 
     const keyFile = path.join(dir, "vayne_api_key");
-    fs.mkdirSync(path.join(dir, "codex-switch"), { recursive: true });
+    fs.mkdirSync(path.join(dir, "api-switch"), { recursive: true });
     fs.writeFileSync(keyFile, "sk-test\n", { mode: 0o600 });
-    fs.writeFileSync(path.join(dir, "codex-switch", "profiles.json"), JSON.stringify({
+    fs.writeFileSync(path.join(dir, "api-switch", "profiles.json"), JSON.stringify({
       version: 1,
       profiles: {
         vayne: {
@@ -1707,7 +1753,7 @@ describe("api-switch", () => {
         },
       },
     }));
-    fs.writeFileSync(path.join(dir, "codex-switch", "proxy-settings.json"), JSON.stringify({
+    fs.writeFileSync(path.join(dir, "api-switch", "proxy-settings.json"), JSON.stringify({
       enabled: true,
       clients: {
         codex: { targetProfile: "vayne" },
@@ -1736,7 +1782,7 @@ describe("api-switch", () => {
   });
 
   it("web UI also serves the Codex local proxy and can stop it", async () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-switch-"));
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "api-switch-"));
     const upstream = http.createServer(async (req, res) => {
       if (req.method === "GET" && req.url === "/v1/models") {
         res.writeHead(200, { "content-type": "application/json" });
@@ -1830,7 +1876,7 @@ describe("api-switch", () => {
   });
 
   it("web UI exposes minimal route and health controls", async () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-switch-"));
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "api-switch-"));
     const upstream = http.createServer((req, res) => {
       if (req.method === "GET" && req.url === "/v1/models") {
         res.writeHead(200, { "content-type": "application/json" });
@@ -1914,7 +1960,7 @@ describe("api-switch", () => {
   });
 
   it("reports profile health through the web API", async () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-switch-"));
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "api-switch-"));
     const upstream = http.createServer((req, res) => {
       if (req.method === "GET" && req.url === "/v1/models") {
         res.writeHead(200, { "content-type": "application/json" });
@@ -1957,7 +2003,7 @@ describe("api-switch", () => {
   });
 
   it("detects profile endpoint capabilities on demand", async () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-switch-"));
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "api-switch-"));
     const hits = [];
     const upstream = http.createServer(async (req, res) => {
       hits.push(`${req.method} ${req.url}`);
@@ -2017,7 +2063,7 @@ describe("api-switch", () => {
   });
 
   it("does not retry generation requests after an upstream 5xx", async () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-switch-"));
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "api-switch-"));
     let attempts = 0;
     const upstream = http.createServer(async (req, res) => {
       if (req.method === "POST" && req.url === "/v1/responses") {
@@ -2089,7 +2135,7 @@ describe("api-switch", () => {
   });
 
   it("does not retry generation requests after upstream 429 and passes trace headers through", async () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-switch-"));
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "api-switch-"));
     let attempts = 0;
     const upstream = http.createServer(async (req, res) => {
       if (req.method === "POST" && req.url === "/v1/responses") {
@@ -2158,7 +2204,7 @@ describe("api-switch", () => {
   });
 
   it("passes through safe OpenAI request headers while replacing authorization", async () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-switch-"));
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "api-switch-"));
     let receivedHeaders = {};
     let receivedPath = "";
     const upstream = http.createServer(async (req, res) => {
@@ -2209,7 +2255,7 @@ describe("api-switch", () => {
   });
 
   it("passes OpenAI-family streaming Responses through without rewriting events", async () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-switch-"));
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "api-switch-"));
     let receivedPath = "";
     let receivedBody = null;
     const upstreamBody = [
@@ -2285,7 +2331,7 @@ describe("api-switch", () => {
   });
 
   it("passes generic model streaming Responses through natively", async () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-switch-"));
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "api-switch-"));
     let receivedPath = "";
     let receivedBody = null;
     const upstreamBody = [
@@ -2358,7 +2404,7 @@ describe("api-switch", () => {
   });
 
   it("bridges Codex Responses streaming requests through NewAPI chat completions", async () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-switch-"));
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "api-switch-"));
     const upstream = http.createServer(async (req, res) => {
       if (req.method === "POST" && req.url === "/v1/chat/completions") {
         const chunks = [];
@@ -2442,7 +2488,7 @@ describe("api-switch", () => {
   });
 
   it("bridges streaming chat tool calls into Codex Responses events", async () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-switch-"));
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "api-switch-"));
     const upstream = http.createServer(async (req, res) => {
       if (req.method === "POST" && req.url === "/v1/chat/completions") {
         res.writeHead(200, { "content-type": "text/event-stream; charset=utf-8" });
@@ -2495,7 +2541,7 @@ describe("api-switch", () => {
   });
 
   it("passes object image_url parts through the Codex Responses chat bridge", async () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-switch-"));
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "api-switch-"));
     let imageUrl = "";
     const upstream = http.createServer(async (req, res) => {
       if (req.method === "POST" && req.url === "/v1/chat/completions") {
@@ -2545,7 +2591,7 @@ describe("api-switch", () => {
   });
 
   it("turns upstream streaming errors into Codex response.failed events", async () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-switch-"));
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "api-switch-"));
     const upstream = http.createServer((req, res) => {
       if (req.method === "POST" && req.url === "/v1/chat/completions") {
         res.writeHead(200, { "content-type": "text/event-stream; charset=utf-8" });
@@ -2591,7 +2637,7 @@ describe("api-switch", () => {
   });
 
   it("writes proxy debug logs when API_SWITCH_DEBUG_PROXY is enabled", async () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-switch-"));
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "api-switch-"));
     const upstream = http.createServer(async (req, res) => {
       if (req.method === "POST" && req.url === "/v1/responses") {
         res.writeHead(200, { "content-type": "application/json" });
@@ -2651,7 +2697,7 @@ describe("api-switch", () => {
         body: JSON.stringify({ model: "claude-opus-4-6", input: "hello", stream: true }),
       });
       assert.equal(response.status, 200);
-      const logDir = path.join(dir, "codex-switch", "proxy-logs");
+      const logDir = path.join(dir, "api-switch", "proxy-logs");
       const files = fs.readdirSync(logDir);
       assert.equal(files.some((name) => name.endsWith("-request.json")), true);
       assert.equal(files.some((name) => name.endsWith("-upstream-response.json")), true);
@@ -2669,7 +2715,7 @@ describe("api-switch", () => {
   });
 
   it("falls back to a backup profile when the active upstream returns 5xx", async () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-switch-"));
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "api-switch-"));
     const primary = http.createServer((req, res) => {
       res.writeHead(502, { "content-type": "application/json" });
       res.end(JSON.stringify({ error: "primary down" }));
@@ -2720,7 +2766,7 @@ describe("api-switch", () => {
   });
 
   it("uses the fallback profile model instead of leaking the failed requested model", async () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-switch-"));
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "api-switch-"));
     let backupModel = "";
     const primary = http.createServer((req, res) => {
       res.writeHead(502, { "content-type": "application/json" });
@@ -2776,7 +2822,7 @@ describe("api-switch", () => {
   });
 
   it("routes requested client models to mapped upstream profiles and models", async () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-switch-"));
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "api-switch-"));
     let receivedModel = "";
     const upstream = http.createServer(async (req, res) => {
       if (req.method === "POST" && req.url === "/v1/responses") {
@@ -2834,7 +2880,7 @@ describe("api-switch", () => {
   });
 
   it("uses fallback profiles for streaming requests before response headers are sent", async () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-switch-"));
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "api-switch-"));
     let primaryAttempts = 0;
     let backupAttempts = 0;
     const primary = http.createServer((req, res) => {
@@ -2887,7 +2933,7 @@ describe("api-switch", () => {
   });
 
   it("configures Claude Code to use and leave the local proxy", () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-switch-"));
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "api-switch-"));
     const claudeDir = fs.mkdtempSync(path.join(os.tmpdir(), "claude-home-"));
     fs.mkdirSync(claudeDir, { recursive: true });
     fs.writeFileSync(path.join(claudeDir, "settings.json"), `${JSON.stringify({
@@ -2907,7 +2953,7 @@ describe("api-switch", () => {
     let settings = JSON.parse(fs.readFileSync(path.join(claudeDir, "settings.json"), "utf8"));
     assert.equal(settings.env.ANTHROPIC_BASE_URL, "http://127.0.0.1:18600");
     assert.equal(settings.env.ANTHROPIC_AUTH_TOKEN, "api-switch");
-    let proxySettings = JSON.parse(fs.readFileSync(path.join(dir, "codex-switch", "proxy-settings.json"), "utf8"));
+    let proxySettings = JSON.parse(fs.readFileSync(path.join(dir, "api-switch", "proxy-settings.json"), "utf8"));
     assert.equal(proxySettings.clients["claude-code"].targetProfile, "claude");
     const account = spawnSync(process.execPath, [bin, "claude-account", "--codex-home", dir, "--claude-home", claudeDir], { encoding: "utf8", env: spawnEnv });
     assert.equal(account.status, 0, account.stderr);
@@ -2915,15 +2961,15 @@ describe("api-switch", () => {
     assert.equal(settings.env.ANTHROPIC_BASE_URL, "https://api.anthropic.example");
     assert.equal(settings.env.ANTHROPIC_AUTH_TOKEN, "original-token");
     assert.equal(settings.env.KEEP_ME, "yes");
-    proxySettings = JSON.parse(fs.readFileSync(path.join(dir, "codex-switch", "proxy-settings.json"), "utf8"));
+    proxySettings = JSON.parse(fs.readFileSync(path.join(dir, "api-switch", "proxy-settings.json"), "utf8"));
     assert.equal(proxySettings.clients["claude-code"].targetProfile, "");
   });
 
   it("refreshes stale Claude Code env backup before switching to proxy mode", () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-switch-"));
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "api-switch-"));
     const claudeDir = fs.mkdtempSync(path.join(os.tmpdir(), "claude-home-"));
-    fs.mkdirSync(path.join(dir, "codex-switch"), { recursive: true });
-    fs.writeFileSync(path.join(dir, "codex-switch", "claude-env.backup.json"), `${JSON.stringify({
+    fs.mkdirSync(path.join(dir, "api-switch"), { recursive: true });
+    fs.writeFileSync(path.join(dir, "api-switch", "claude-env.backup.json"), `${JSON.stringify({
       version: 1,
       env: {
         ANTHROPIC_BASE_URL: "https://old.example",
@@ -2954,7 +3000,7 @@ describe("api-switch", () => {
   });
 
   it("does not switch Claude Code to proxy mode when the target API key is missing", () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-switch-"));
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "api-switch-"));
     const claudeDir = fs.mkdtempSync(path.join(os.tmpdir(), "claude-home-"));
     const setup = spawnSync(process.execPath, [bin, "setup", "--codex-home", dir, "--name", "claude", "--base-url", "https://api.example.com/v1", "--model", "claude-opus-4-6"], {
       input: "sk-claude\n",
@@ -2968,11 +3014,11 @@ describe("api-switch", () => {
     assert.notEqual(proxy.status, 0);
     assert.match(proxy.stderr, /API key not found/);
     assert.equal(fs.existsSync(path.join(claudeDir, "settings.json")), false);
-    assert.equal(fs.existsSync(path.join(dir, "codex-switch", "proxy-settings.json")), false);
+    assert.equal(fs.existsSync(path.join(dir, "api-switch", "proxy-settings.json")), false);
   });
 
   it("keeps Codex and Claude Code proxy targets independent", () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-switch-"));
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "api-switch-"));
     const claudeDir = fs.mkdtempSync(path.join(os.tmpdir(), "claude-home-"));
     spawnSync(process.execPath, [bin, "setup", "--codex-home", dir, "--name", "gpt", "--base-url", "https://api.example.com/v1", "--model", "gpt-5.5"], {
       input: "sk-gpt\n",
@@ -2988,13 +3034,13 @@ describe("api-switch", () => {
     const claude = spawnSync(process.execPath, [bin, "claude-proxy", "--codex-home", dir, "--claude-home", claudeDir, "--name", "claude"], { encoding: "utf8", env: spawnEnv });
     assert.equal(claude.status, 0, claude.stderr);
 
-    const proxySettings = JSON.parse(fs.readFileSync(path.join(dir, "codex-switch", "proxy-settings.json"), "utf8"));
+    const proxySettings = JSON.parse(fs.readFileSync(path.join(dir, "api-switch", "proxy-settings.json"), "utf8"));
     assert.equal(proxySettings.clients.codex.targetProfile, "gpt");
     assert.equal(proxySettings.clients["claude-code"].targetProfile, "claude");
   });
 
   it("proxies Claude Code Anthropic messages requests", async () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-switch-"));
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "api-switch-"));
     let receivedHeaders = {};
     const upstream = http.createServer(async (req, res) => {
       if (req.method === "POST" && req.url === "/v1/chat/completions") {
@@ -3051,7 +3097,7 @@ describe("api-switch", () => {
   });
 
   it("bridges Claude Code tool_use and tool_result through chat completions", async () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-switch-"));
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "api-switch-"));
     let upstreamMessages = [];
     const upstream = http.createServer(async (req, res) => {
       if (req.method === "POST" && req.url === "/v1/chat/completions") {

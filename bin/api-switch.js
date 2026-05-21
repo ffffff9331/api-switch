@@ -9,8 +9,12 @@ const { execFile, execFileSync } = require("node:child_process");
 const { createProxyHandler, startProxyServer } = require("../lib/proxy/server");
 const { capabilitiesForModel } = require("../lib/proxy/provider-registry");
 
-const START = "# >>> codex-switch";
-const END = "# <<< codex-switch";
+const START = "# >>> api-switch";
+const END = "# <<< api-switch";
+const LEGACY_START = "# >>> codex-switch";
+const LEGACY_END = "# <<< codex-switch";
+const DATA_DIR = "api-switch";
+const LEGACY_DATA_DIR = "codex-switch";
 const DEFAULT_PORT = 18600;
 const PROXY_API_KEY = "api-switch";
 
@@ -39,9 +43,6 @@ Usage:
   api-switch web
   api-switch proxy
   api-switch remove --name <profile>
-
-Compatibility:
-  The old codex-switch command remains available as an alias.
 
 Options:
   --codex-home <dir>       Defaults to ~/.codex
@@ -124,20 +125,49 @@ function tomlString(value) {
   return JSON.stringify(value);
 }
 
-function removeManagedBlock(config, name) {
-  const pattern = new RegExp(
-    `\\n?${escapeRegExp(START)}:${escapeRegExp(name)}\\n[\\s\\S]*?${escapeRegExp(END)}:${escapeRegExp(name)}\\n?`,
+function managedBlockPattern(startMarker, endMarker, name) {
+  const suffix = name ? escapeRegExp(name) : "([A-Za-z0-9_-]+)";
+  const endSuffix = name ? escapeRegExp(name) : "\\1";
+  return new RegExp(
+    "\\n?" + escapeRegExp(startMarker) + ":" + suffix + "\\n[\\s\\S]*?" + escapeRegExp(endMarker) + ":" + endSuffix + "\\n?",
     "g",
   );
-  return config.replace(pattern, "\n").replace(/\n{3,}/g, "\n\n");
+}
+
+function removeManagedBlock(config, name) {
+  return config
+    .replace(managedBlockPattern(START, END, name), "\n")
+    .replace(managedBlockPattern(LEGACY_START, LEGACY_END, name), "\n")
+    .replace(/\n{3,}/g, "\n\n");
 }
 
 function removeAllManagedBlocks(config) {
-  const pattern = new RegExp(
-    `\\n?${escapeRegExp(START)}:([A-Za-z0-9_-]+)\\n[\\s\\S]*?${escapeRegExp(END)}:\\1\\n?`,
-    "g",
-  );
-  return config.replace(pattern, "\n").replace(/\n{3,}/g, "\n\n").trimStart();
+  return config
+    .replace(managedBlockPattern(START, END), "\n")
+    .replace(managedBlockPattern(LEGACY_START, LEGACY_END), "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trimStart();
+}
+
+function dataDir(codexHome) {
+  return path.join(codexHome, DATA_DIR);
+}
+
+function legacyDataDir(codexHome) {
+  return path.join(codexHome, LEGACY_DATA_DIR);
+}
+
+function migrateLegacyDataDir(codexHome) {
+  const primary = dataDir(codexHome);
+  const legacy = legacyDataDir(codexHome);
+  if (fs.existsSync(primary) || !fs.existsSync(legacy)) return;
+  fs.mkdirSync(path.dirname(primary), { recursive: true, mode: 0o700 });
+  fs.cpSync(legacy, primary, { recursive: true, force: false, errorOnExist: false });
+}
+
+function apiSwitchDataPath(codexHome, ...parts) {
+  migrateLegacyDataDir(codexHome);
+  return path.join(dataDir(codexHome), ...parts);
 }
 
 function escapeRegExp(value) {
@@ -167,7 +197,7 @@ function resolvePaths(args) {
   const codexHome = expandHome(args.codexHome || "~/.codex");
   const configPath = path.join(codexHome, "config.toml");
   const keyFile = expandHome(args.keyFile || path.join(codexHome, `${args.name}_api_key`));
-  const catalogFile = path.join(codexHome, "codex-switch", `${args.name}_models.json`);
+  const catalogFile = apiSwitchDataPath(codexHome, `${args.name}_models.json`);
   return { codexHome, configPath, keyFile, catalogFile };
 }
 
@@ -223,7 +253,7 @@ function writeModelCatalog(codexHome, name, models) {
   const uniqueModels = [...new Set(models.filter((model) => typeof model === "string" && model.trim()))];
   if (!uniqueModels.length) return "";
 
-  const catalogFile = path.join(codexHome, "codex-switch", `${name}_models.json`);
+  const catalogFile = apiSwitchDataPath(codexHome, `${name}_models.json`);
   fs.mkdirSync(path.dirname(catalogFile), { recursive: true, mode: 0o700 });
   atomicWriteFile(
     catalogFile,
@@ -247,11 +277,11 @@ function readModelCatalog(catalogFile) {
 }
 
 function profilesStorePath(codexHome) {
-  return path.join(codexHome, "codex-switch", "profiles.json");
+  return apiSwitchDataPath(codexHome, "profiles.json");
 }
 
 function routesStorePath(codexHome) {
-  return path.join(codexHome, "codex-switch", "routes.json");
+  return apiSwitchDataPath(codexHome, "routes.json");
 }
 
 function readProfilesStore(codexHome) {
@@ -326,7 +356,7 @@ function ensureStoredProfile(codexHome, profile) {
     keyEnv: profile.keyEnv || "",
     reasoningEffort: profile.reasoningEffort || "medium",
     fallbackProfiles: Array.isArray(profile.fallbackProfiles) ? profile.fallbackProfiles : [],
-    catalogFile: profile.catalogFile || path.join(codexHome, "codex-switch", `${profile.name}_models.json`),
+    catalogFile: profile.catalogFile || apiSwitchDataPath(codexHome, `${profile.name}_models.json`),
     importedFrom: "legacy-config",
     updatedAt: new Date().toISOString(),
   };
@@ -468,7 +498,7 @@ function claudeSettingsPath(args) {
 }
 
 function claudeEnvBackupPath(codexHome) {
-  return path.join(codexHome, "codex-switch", "claude-env.backup.json");
+  return apiSwitchDataPath(codexHome, "claude-env.backup.json");
 }
 
 function backupClaudeCodeEnv(codexHome, settings) {
@@ -547,7 +577,7 @@ function legacyLaunchAgentPath() {
 }
 
 function serviceLogDir() {
-  return path.join(os.homedir(), ".codex", "codex-switch", "service-logs");
+  return path.join(os.homedir(), ".codex", DATA_DIR, "service-logs");
 }
 
 function windowsStartupScriptPath() {
@@ -891,13 +921,13 @@ function latestThreadId(stateDb) {
 
 function backupStateDb(stateDb) {
   const stamp = new Date().toISOString().replace(/[-:.TZ]/g, "").slice(0, 14);
-  const backupPath = `${stateDb}.codex-switch-${stamp}.bak`;
+  const backupPath = `${stateDb}.api-switch-${stamp}.bak`;
   fs.copyFileSync(stateDb, backupPath);
   return backupPath;
 }
 
 function backupFile(filePath, stamp) {
-  const backupPath = `${filePath}.codex-switch-${stamp}.bak`;
+  const backupPath = `${filePath}.api-switch-${stamp}.bak`;
   fs.copyFileSync(filePath, backupPath);
   return backupPath;
 }
@@ -960,7 +990,7 @@ function rewriteRolloutFirstLine(rolloutPath, firstLine, info, stamp) {
     return;
   }
 
-  const tempPath = `${rolloutPath}.codex-switch-${stamp}.${process.pid}.tmp`;
+  const tempPath = `${rolloutPath}.api-switch-${stamp}.${process.pid}.tmp`;
   const inFd = fs.openSync(rolloutPath, "r");
   const outFd = fs.openSync(tempPath, "wx", 0o600);
   const buffer = Buffer.allocUnsafe(1024 * 1024);
@@ -1072,10 +1102,12 @@ function updateRolloutModel(rolloutPath, model, stamp) {
 }
 
 function originalRolloutPath(rolloutPath) {
-  const marker = ".codex-switch-";
-  const markerIndex = rolloutPath.indexOf(marker);
-  if (markerIndex === -1 || !rolloutPath.endsWith(".bak")) return "";
-  return rolloutPath.slice(0, markerIndex);
+  if (!rolloutPath.endsWith(".bak")) return "";
+  for (const marker of [".api-switch-", ".codex-switch-"]) {
+    const markerIndex = rolloutPath.indexOf(marker);
+    if (markerIndex !== -1) return rolloutPath.slice(0, markerIndex);
+  }
+  return "";
 }
 
 function repairRolloutPath(rolloutPath, stamp) {
@@ -1086,7 +1118,7 @@ function repairRolloutPath(rolloutPath, stamp) {
   fs.copyFileSync(rolloutPath, originalPath);
   fs.chmodSync(originalPath, 0o600);
 
-  const repairBackupPath = `${rolloutPath}.codex-switch-repair-${stamp}.bak`;
+  const repairBackupPath = `${rolloutPath}.api-switch-repair-${stamp}.bak`;
   fs.copyFileSync(rolloutPath, repairBackupPath);
   return originalPath;
 }
@@ -1145,7 +1177,7 @@ function migrateThreads(codexHome, provider, options = {}) {
 
   if (!changed && !modelChanged && !rolloutChanged && !rolloutModelChanged && repairs.length === 0) return null;
 
-  const backupPath = `${stateDb}.codex-switch-${stamp}.bak`;
+  const backupPath = `${stateDb}.api-switch-${stamp}.bak`;
   fs.copyFileSync(stateDb, backupPath);
   for (const repair of repairs) {
     sqlite(
@@ -1259,7 +1291,7 @@ function authPath(codexHome) {
 }
 
 function accountAuthBackupPath(codexHome) {
-  return path.join(codexHome, "codex-switch", "account-auth.backup.json");
+  return apiSwitchDataPath(codexHome, "account-auth.backup.json");
 }
 
 function readJsonFile(filePath) {
@@ -1295,7 +1327,7 @@ function writeJsonFile(filePath, value) {
 
 function backupPathFor(filePath, label = "backup") {
   const stamp = new Date().toISOString().replace(/[-:.TZ]/g, "").slice(0, 14);
-  return `${filePath}.codex-switch-${label}-${stamp}.bak`;
+  return `${filePath}.api-switch-${label}-${stamp}.bak`;
 }
 
 function backupConfigFile(filePath, label = "backup") {
@@ -1463,7 +1495,7 @@ function tomlArrayFirst(block, key) {
 
 function managedProfilePattern() {
   return new RegExp(
-    `${escapeRegExp(START)}:([A-Za-z0-9_-]+)\\n([\\s\\S]*?)${escapeRegExp(END)}:\\1`,
+    "(?:" + escapeRegExp(START) + "|" + escapeRegExp(LEGACY_START) + "):([A-Za-z0-9_-]+)\\n([\\s\\S]*?)(?:" + escapeRegExp(END) + "|" + escapeRegExp(LEGACY_END) + "):\\1",
     "g",
   );
 }
@@ -1905,7 +1937,7 @@ function startProxy(args) {
     resolveModelRoute: (client, requestedModel, activeProfile) => resolveModelRoute(codexHome, client, requestedModel, activeProfile),
     getFallbackProfiles: (client) => proxyFallbackProfiles(codexHome, client),
     getApiKey: profileApiKey,
-    debugDir: path.join(codexHome, "codex-switch"),
+    debugDir: apiSwitchDataPath(codexHome),
   });
 }
 
@@ -3388,7 +3420,7 @@ function apiKeyForPayload(payload, codexHome) {
 }
 
 function proxySettingsPath(codexHome) {
-  return path.join(codexHome, "codex-switch", "proxy-settings.json");
+  return apiSwitchDataPath(codexHome, "proxy-settings.json");
 }
 
 function readProxySettings(codexHome) {
@@ -3428,7 +3460,7 @@ function writeProxySettings(codexHome, settings) {
 }
 
 function proxyRequestsPath(codexHome) {
-  return path.join(codexHome, "codex-switch", "proxy-requests.jsonl");
+  return apiSwitchDataPath(codexHome, "proxy-requests.jsonl");
 }
 
 function appendProxyRequest(codexHome, entry) {
@@ -3490,7 +3522,7 @@ function startWeb(args) {
     getFallbackProfiles: (client) => proxyFallbackProfiles(codexHome, client),
     resolveModelRoute: (client, requestedModel, activeProfile) => resolveModelRoute(codexHome, client, requestedModel, activeProfile),
     getApiKey: profileApiKey,
-    debugDir: path.join(codexHome, "codex-switch"),
+    debugDir: apiSwitchDataPath(codexHome),
     recordRequest: recordProxyRequest,
   });
 
