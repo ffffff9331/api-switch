@@ -421,6 +421,8 @@ function defaultCommand(args) {
   console.log(`Set Codex to use local proxy target: ${args.name}`);
   console.log(`OpenAI base URL: http://${host}:${port}/v1`);
   console.log(`API key: ${PROXY_API_KEY}`);
+  const service = ensureProxyService({ host, port });
+  console.log(service.message);
   if (migration) {
     console.log(`Moved ${migration.changed} thread(s) to provider: openai`);
     if (migration.modelChanged) console.log(`Updated ${migration.modelChanged} thread model(s) to: ${profile.model}`);
@@ -544,12 +546,30 @@ function legacyLaunchAgentPath() {
   return path.join(os.homedir(), "Library", "LaunchAgents", "com.codex-switch.web.plist");
 }
 
+function serviceLogDir() {
+  return path.join(os.homedir(), ".codex", "codex-switch", "service-logs");
+}
+
+function windowsStartupScriptPath() {
+  const startup = process.env.APPDATA
+    ? path.join(process.env.APPDATA, "Microsoft", "Windows", "Start Menu", "Programs", "Startup")
+    : path.join(os.homedir(), "AppData", "Roaming", "Microsoft", "Windows", "Start Menu", "Programs", "Startup");
+  return path.join(startup, "api-switch-web.cmd");
+}
+
+function linuxSystemdServicePath() {
+  return path.join(os.homedir(), ".config", "systemd", "user", "api-switch-web.service");
+}
+
+function webCommandArgs(args) {
+  return ["web", "--host", args.host || "127.0.0.1", "--port", String(args.port || DEFAULT_PORT), "--no-open"];
+}
+
 function servicePlist(args) {
   const nodePath = process.execPath;
   const scriptPath = path.resolve(__filename);
-  const host = args.host || "127.0.0.1";
-  const port = String(args.port || DEFAULT_PORT);
-  const logDir = path.join(os.homedir(), ".codex", "codex-switch", "service-logs");
+  const [command, , host, , port, noOpen] = webCommandArgs(args);
+  const logDir = serviceLogDir();
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -559,13 +579,17 @@ function servicePlist(args) {
   <array>
     <string>${nodePath}</string>
     <string>${scriptPath}</string>
-    <string>web</string>
+    <string>${command}</string>
     <string>--host</string><string>${host}</string>
     <string>--port</string><string>${port}</string>
-    <string>--no-open</string>
+    <string>${noOpen}</string>
   </array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>API_SWITCH_SERVICE_MANAGER</key><string>1</string>
+  </dict>
   <key>StandardOutPath</key><string>${path.join(logDir, "out.log")}</string>
   <key>StandardErrorPath</key><string>${path.join(logDir, "err.log")}</string>
 </dict>
@@ -573,12 +597,11 @@ function servicePlist(args) {
 `;
 }
 
-function serviceInstall(args) {
-  if (process.platform !== "darwin") throw new Error("service-install currently supports macOS LaunchAgent only.");
+function serviceInstallMac(args) {
   const plistPath = launchAgentPath();
   const legacyPlistPath = legacyLaunchAgentPath();
   fs.mkdirSync(path.dirname(plistPath), { recursive: true });
-  fs.mkdirSync(path.join(os.homedir(), ".codex", "codex-switch", "service-logs"), { recursive: true });
+  fs.mkdirSync(serviceLogDir(), { recursive: true });
   fs.writeFileSync(plistPath, servicePlist(args), { mode: 0o644 });
   const domain = `gui/${process.getuid()}`;
   if (fs.existsSync(legacyPlistPath)) {
@@ -600,6 +623,78 @@ function serviceInstall(args) {
   console.log(`Started API Switch service on port ${args.port || DEFAULT_PORT}.`);
 }
 
+function serviceInstallWindows(args) {
+  const scriptPath = windowsStartupScriptPath();
+  const nodePath = process.execPath;
+  const apiSwitchPath = path.resolve(__filename);
+  const logDir = serviceLogDir();
+  fs.mkdirSync(path.dirname(scriptPath), { recursive: true });
+  fs.mkdirSync(logDir, { recursive: true });
+  const command = [
+    "@echo off",
+    "set API_SWITCH_SERVICE_MANAGER=1",
+    `start "" /min "${nodePath}" "${apiSwitchPath}" ${webCommandArgs(args).join(" ")} >> "${path.join(logDir, "out.log")}" 2>> "${path.join(logDir, "err.log")}"`,
+    "",
+  ].join("\r\n");
+  fs.writeFileSync(scriptPath, command);
+  execFile(process.execPath, [apiSwitchPath, ...webCommandArgs(args)], {
+    detached: true,
+    stdio: "ignore",
+    windowsHide: true,
+    env: { ...process.env, API_SWITCH_SERVICE_MANAGER: "1" },
+  }).unref();
+  console.log(`Installed Windows startup script: ${scriptPath}`);
+  console.log(`Started API Switch service on port ${args.port || DEFAULT_PORT}.`);
+}
+
+function serviceInstallLinux(args) {
+  const servicePath = linuxSystemdServicePath();
+  const nodePath = process.execPath;
+  const apiSwitchPath = path.resolve(__filename);
+  fs.mkdirSync(path.dirname(servicePath), { recursive: true });
+  fs.mkdirSync(serviceLogDir(), { recursive: true });
+  fs.writeFileSync(servicePath, [
+    "[Unit]",
+    "Description=API Switch web proxy",
+    "",
+    "[Service]",
+    "Environment=API_SWITCH_SERVICE_MANAGER=1",
+    `ExecStart=${nodePath} ${apiSwitchPath} ${webCommandArgs(args).join(" ")}`,
+    "Restart=always",
+    "RestartSec=2",
+    "",
+    "[Install]",
+    "WantedBy=default.target",
+    "",
+  ].join("\n"));
+  execFileSync("systemctl", ["--user", "daemon-reload"], { stdio: "ignore" });
+  execFileSync("systemctl", ["--user", "enable", "--now", "api-switch-web.service"], { stdio: "ignore" });
+  console.log(`Installed systemd user service: ${servicePath}`);
+  console.log(`Started API Switch service on port ${args.port || DEFAULT_PORT}.`);
+}
+
+function serviceInstall(args) {
+  if (process.platform === "darwin") return serviceInstallMac(args);
+  if (process.platform === "win32") return serviceInstallWindows(args);
+  if (process.platform === "linux") return serviceInstallLinux(args);
+  throw new Error(`service-install is not supported on ${process.platform}. Run: api-switch web --host ${args.host || "127.0.0.1"} --port ${args.port || DEFAULT_PORT} --no-open`);
+}
+
+function ensureProxyService(args) {
+  if (process.env.API_SWITCH_SKIP_SERVICE_INSTALL === "1") {
+    return { ok: true, message: "API Switch service install skipped by API_SWITCH_SKIP_SERVICE_INSTALL." };
+  }
+  try {
+    serviceInstall({ ...args, noOpen: true });
+    return { ok: true, message: `API Switch service is installed and running on port ${args.port || DEFAULT_PORT}.` };
+  } catch (error) {
+    return {
+      ok: false,
+      message: `Could not start API Switch service automatically: ${error.message}. Run: api-switch service-install --host ${args.host || "127.0.0.1"} --port ${args.port || DEFAULT_PORT}`,
+    };
+  }
+}
+
 function serviceUninstall() {
   const plistPath = launchAgentPath();
   const legacyPlistPath = legacyLaunchAgentPath();
@@ -612,26 +707,47 @@ function serviceUninstall() {
   }
   if (fs.existsSync(plistPath)) fs.unlinkSync(plistPath);
   if (fs.existsSync(legacyPlistPath)) fs.unlinkSync(legacyPlistPath);
+  if (process.platform === "win32") {
+    const scriptPath = windowsStartupScriptPath();
+    if (fs.existsSync(scriptPath)) fs.unlinkSync(scriptPath);
+    console.log(`Removed Windows startup script: ${scriptPath}`);
+    return;
+  }
+  if (process.platform === "linux") {
+    try {
+      execFileSync("systemctl", ["--user", "disable", "--now", "api-switch-web.service"], { stdio: "ignore" });
+    } catch (_) {
+      // It is fine if the service is already stopped.
+    }
+    const servicePath = linuxSystemdServicePath();
+    if (fs.existsSync(servicePath)) fs.unlinkSync(servicePath);
+    console.log(`Removed systemd user service: ${servicePath}`);
+    return;
+  }
   console.log(`Removed LaunchAgent: ${plistPath}`);
 }
 
 function serviceStatus() {
   const status = serviceStatusData();
-  console.log(`LaunchAgent: ${status.installed ? "installed" : "not installed"}`);
+  console.log(`Service: ${status.installed ? "installed" : "not installed"}`);
   console.log(`Path: ${status.path}`);
-  if (status.platform === "darwin") {
+  if (status.platform === "darwin" || status.platform === "linux") {
     console.log(`Status: ${status.loaded ? `loaded${status.pid ? `, pid ${status.pid}` : ""}` : "not loaded"}`);
   }
 }
 
 function serviceStatusData() {
-  const plistPath = launchAgentPath();
+  const servicePath = process.platform === "win32"
+    ? windowsStartupScriptPath()
+    : process.platform === "linux"
+      ? linuxSystemdServicePath()
+      : launchAgentPath();
   const result = {
     platform: process.platform,
-    installed: fs.existsSync(plistPath),
+    installed: fs.existsSync(servicePath),
     loaded: false,
     pid: null,
-    path: plistPath,
+    path: servicePath,
   };
   if (process.platform === "darwin") {
     const domain = `gui/${process.getuid()}`;
@@ -640,6 +756,15 @@ function serviceStatusData() {
       const pid = output.match(/\bpid = (\d+)/);
       result.loaded = true;
       result.pid = pid ? pid[1] : null;
+    } catch (_) {
+      result.loaded = false;
+    }
+  } else if (process.platform === "linux") {
+    try {
+      const output = execFileSync("systemctl", ["--user", "show", "api-switch-web.service", "--property=ActiveState,MainPID"], { encoding: "utf8" });
+      result.loaded = /ActiveState=active/.test(output);
+      const pid = output.match(/MainPID=(\d+)/);
+      result.pid = pid && pid[1] !== "0" ? pid[1] : null;
     } catch (_) {
       result.loaded = false;
     }
@@ -3666,6 +3791,15 @@ function startWeb(args) {
       if (await isApiSwitchRunning(url)) {
         console.log(`API Switch web UI is already running: ${url}`);
         if (!args.noOpen) openBrowser(url);
+        // In foreground CLI mode this is just a friendly success.  Under a
+        // service manager (LaunchAgent/systemd/Startup wrapper), exiting here
+        // can create a restart loop when a stale foreground instance already
+        // owns the port.  Keep the service process alive so KeepAlive does not
+        // spin, and so a later stop of the stale owner lets the service bind.
+        if (process.env.API_SWITCH_SERVICE_MANAGER === "1") {
+          setInterval(() => {}, 60 * 60 * 1000);
+          return;
+        }
         process.exit(0);
       }
       console.error(`Port is already in use: ${url}`);

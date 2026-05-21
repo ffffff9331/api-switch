@@ -3,12 +3,14 @@ const { describe, it } = require("node:test");
 const { spawn, spawnSync } = require("node:child_process");
 const fs = require("node:fs");
 const http = require("node:http");
+const net = require("node:net");
 const os = require("node:os");
 const path = require("node:path");
 
 const bin = path.join(__dirname, "..", "bin", "api-switch.js");
 const { responsesToChatPayload } = require("../lib/proxy/chat-bridge");
 const { adapterForModel, capabilitiesForModel, routeModel } = require("../lib/proxy/provider-registry");
+const spawnEnv = { ...process.env, API_SWITCH_SKIP_SERVICE_INSTALL: "1" };
 
 function waitForWebUrl(child) {
   return new Promise((resolve, reject) => {
@@ -62,6 +64,118 @@ function waitForProxyUrl(child) {
         clearTimeout(timer);
         reject(new Error(`Proxy server exited with code ${code}. Output: ${output}`));
       }
+    });
+  });
+}
+
+function encodeWebSocketText(message) {
+  const payload = Buffer.from(String(message));
+  const mask = Buffer.from([1, 2, 3, 4]);
+  const header = [];
+  header.push(0x81);
+  if (payload.length < 126) {
+    header.push(0x80 | payload.length);
+  } else if (payload.length < 65536) {
+    header.push(0x80 | 126, (payload.length >> 8) & 0xff, payload.length & 0xff);
+  } else {
+    throw new Error("Test WebSocket payload is too large.");
+  }
+  const masked = Buffer.from(payload);
+  for (let index = 0; index < masked.length; index += 1) masked[index] ^= mask[index % 4];
+  return Buffer.concat([Buffer.from(header), mask, masked]);
+}
+
+function decodeWebSocketFrames(buffer) {
+  const messages = [];
+  let offset = 0;
+  while (offset + 2 <= buffer.length) {
+    const first = buffer[offset];
+    const second = buffer[offset + 1];
+    const opcode = first & 0x0f;
+    let length = second & 0x7f;
+    offset += 2;
+    if (length === 126) {
+      if (offset + 2 > buffer.length) break;
+      length = buffer.readUInt16BE(offset);
+      offset += 2;
+    } else if (length === 127) {
+      if (offset + 8 > buffer.length) break;
+      const high = buffer.readUInt32BE(offset);
+      const low = buffer.readUInt32BE(offset + 4);
+      offset += 8;
+      if (high !== 0) throw new Error("Frame too large.");
+      length = low;
+    }
+    const masked = (second & 0x80) !== 0;
+    let mask = null;
+    if (masked) {
+      if (offset + 4 > buffer.length) break;
+      mask = buffer.subarray(offset, offset + 4);
+      offset += 4;
+    }
+    if (offset + length > buffer.length) break;
+    const payload = Buffer.from(buffer.subarray(offset, offset + length));
+    offset += length;
+    if (mask) {
+      for (let index = 0; index < payload.length; index += 1) payload[index] ^= mask[index % 4];
+    }
+    if (opcode === 0x1) messages.push(payload.toString("utf8"));
+  }
+  return messages;
+}
+
+function websocketResponsesRequest(baseUrl, payload) {
+  return new Promise((resolve, reject) => {
+    const url = new URL(baseUrl);
+    const socket = net.connect(Number(url.port), url.hostname);
+    const chunks = [];
+    const timer = setTimeout(() => {
+      socket.destroy();
+      reject(new Error("Timed out waiting for WebSocket response."));
+    }, 5000);
+    let upgraded = false;
+    let data = Buffer.alloc(0);
+    socket.on("connect", () => {
+      socket.write([
+        "GET /v1/responses HTTP/1.1",
+        `Host: ${url.host}`,
+        "Upgrade: websocket",
+        "Connection: Upgrade",
+        "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==",
+        "Sec-WebSocket-Version: 13",
+        "\r\n",
+      ].join("\r\n"));
+    });
+    socket.on("data", (chunk) => {
+      data = Buffer.concat([data, chunk]);
+      if (!upgraded) {
+        const marker = data.indexOf("\r\n\r\n");
+        if (marker === -1) return;
+        const header = data.subarray(0, marker).toString("utf8");
+        if (!header.startsWith("HTTP/1.1 101")) {
+          clearTimeout(timer);
+          socket.destroy();
+          reject(new Error(`Unexpected WebSocket handshake: ${header}`));
+          return;
+        }
+        upgraded = true;
+        const rest = data.subarray(marker + 4);
+        data = Buffer.alloc(0);
+        socket.write(encodeWebSocketText(JSON.stringify(payload)));
+        if (rest.length) chunks.push(rest);
+      } else {
+        chunks.push(chunk);
+      }
+      const messages = decodeWebSocketFrames(Buffer.concat(chunks));
+      if (messages.length) {
+        clearTimeout(timer);
+        socket.end();
+        resolve(messages);
+      }
+    });
+    socket.on("error", (error) => {
+      clearTimeout(timer);
+      reject(error);
     });
   });
 }
@@ -151,6 +265,7 @@ describe("api-switch", () => {
 
     const result = spawnSync(process.execPath, [bin, "remove", "--codex-home", dir, "--name", "vayne"], {
       encoding: "utf8",
+      env: spawnEnv,
     });
 
     assert.equal(result.status, 0, result.stderr);
@@ -174,13 +289,13 @@ describe("api-switch", () => {
         "--model",
         "gpt-5.5",
       ],
-      { input: "sk-test\n", encoding: "utf8" },
+      { input: "sk-test\n", encoding: "utf8", env: spawnEnv },
     );
 
     const result = spawnSync(
       process.execPath,
       [bin, "remove", "--codex-home", dir, "--name", "vayne", "--delete-key"],
-      { encoding: "utf8" },
+      { encoding: "utf8", env: spawnEnv },
     );
 
     assert.equal(result.status, 0, result.stderr);
@@ -203,12 +318,12 @@ describe("api-switch", () => {
         "--model",
         "gpt-5.5",
       ],
-      { input: "sk-one\n", encoding: "utf8" },
+      { input: "sk-one\n", encoding: "utf8", env: spawnEnv },
     );
     assert.equal(setup.status, 0, setup.stderr);
     fs.unlinkSync(path.join(dir, "vayne_api_key"));
 
-    const result = spawnSync(process.execPath, [bin, "default", "--codex-home", dir, "--name", "vayne"], { encoding: "utf8" });
+    const result = spawnSync(process.execPath, [bin, "default", "--codex-home", dir, "--name", "vayne"], { encoding: "utf8", env: spawnEnv });
 
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /API key not found/);
@@ -236,11 +351,11 @@ describe("api-switch", () => {
         "--model",
         "gpt-5.5",
       ],
-      { input: "sk-one\n", encoding: "utf8" },
+      { input: "sk-one\n", encoding: "utf8", env: spawnEnv },
     );
     assert.equal(setup.status, 0, setup.stderr);
 
-    const result = spawnSync(process.execPath, [bin, "default", "--codex-home", dir, "--name", "vayne"], { encoding: "utf8" });
+    const result = spawnSync(process.execPath, [bin, "default", "--codex-home", dir, "--name", "vayne"], { encoding: "utf8", env: spawnEnv });
 
     assert.notEqual(result.status, 0);
     const config = fs.readFileSync(path.join(dir, "config.toml"), "utf8");
@@ -267,7 +382,7 @@ describe("api-switch", () => {
         "--model",
         "gpt-5.5",
       ],
-      { input: "sk-one\n", encoding: "utf8" },
+      { input: "sk-one\n", encoding: "utf8", env: spawnEnv },
     );
     const second = spawnSync(
       process.execPath,
@@ -283,7 +398,7 @@ describe("api-switch", () => {
         "--model",
         "gpt-5.4",
       ],
-      { input: "sk-two\n", encoding: "utf8" },
+      { input: "sk-two\n", encoding: "utf8", env: spawnEnv },
     );
 
     assert.equal(first.status, 0, first.stderr);
@@ -310,7 +425,7 @@ describe("api-switch", () => {
         "--model",
         "gpt-5.5",
       ],
-      { input: "sk-one\n", encoding: "utf8" },
+      { input: "sk-one\n", encoding: "utf8", env: spawnEnv },
     );
     assert.equal(setup.status, 0, setup.stderr);
 
@@ -326,7 +441,7 @@ describe("api-switch", () => {
         "--model",
         "gpt-5.4",
       ],
-      { encoding: "utf8" },
+      { encoding: "utf8", env: spawnEnv },
     );
 
     assert.equal(result.status, 0, result.stderr);
@@ -357,7 +472,7 @@ describe("api-switch", () => {
         "--model",
         "gpt-5.5",
       ],
-      { input: "sk-one\n", encoding: "utf8" },
+      { input: "sk-one\n", encoding: "utf8", env: spawnEnv },
     );
     assert.equal(setup.status, 0, setup.stderr);
 
@@ -375,7 +490,7 @@ describe("api-switch", () => {
         "--name",
         "vayne",
       ],
-      { encoding: "utf8" },
+      { encoding: "utf8", env: spawnEnv },
     );
 
     assert.equal(result.status, 0, result.stderr);
@@ -416,6 +531,7 @@ describe("api-switch", () => {
 
     const result = spawnSync(process.execPath, [bin, "default", "--codex-home", dir, "--name", "vayne"], {
       encoding: "utf8",
+      env: spawnEnv,
     });
 
     assert.equal(result.status, 0, result.stderr);
@@ -446,7 +562,7 @@ describe("api-switch", () => {
         "--model",
         "gpt-5.5",
       ],
-      { input: "sk-one\n", encoding: "utf8" },
+      { input: "sk-one\n", encoding: "utf8", env: spawnEnv },
     );
     assert.equal(setup.status, 0, setup.stderr);
 
@@ -472,13 +588,13 @@ describe("api-switch", () => {
           `insert into threads (id, archived, model, model_provider, rollout_path) values ('archived-account', 1, 'gpt-5.4', 'openai', '${archivedRollout.replace(/'/g, "''")}');`,
         ].join(" "),
       ],
-      { encoding: "utf8" },
+      { encoding: "utf8", env: spawnEnv },
     );
 
     const result = spawnSync(
       process.execPath,
       [bin, "default", "--codex-home", dir, "--name", "vayne"],
-      { encoding: "utf8" },
+      { encoding: "utf8", env: spawnEnv },
     );
 
     assert.equal(result.status, 0, result.stderr);
@@ -488,7 +604,7 @@ describe("api-switch", () => {
     const rows = spawnSync(
       "sqlite3",
       [dbPath, "select id || '|' || model || '|' || model_provider from threads order by id;"],
-      { encoding: "utf8" },
+      { encoding: "utf8", env: spawnEnv },
     );
     assert.equal(rows.status, 0, rows.stderr);
     assert.match(rows.stdout, /active-account\|gpt-5\.5\|openai/);
@@ -517,7 +633,7 @@ describe("api-switch", () => {
         "--model",
         "gpt-5.5",
       ],
-      { input: "sk-one\n", encoding: "utf8" },
+      { input: "sk-one\n", encoding: "utf8", env: spawnEnv },
     );
     assert.equal(setup.status, 0, setup.stderr);
 
@@ -531,20 +647,20 @@ describe("api-switch", () => {
           "insert into threads (id, archived, model, model_provider, rollout_path, workspace_id, repo_id, git_root, branch) values ('workspace-thread', 0, 'gpt-5.4', 'openai', '', 'ws-account', 'repo-account', '/Users/fan/project', 'main');",
         ].join(" "),
       ],
-      { encoding: "utf8" },
+      { encoding: "utf8", env: spawnEnv },
     );
 
     const result = spawnSync(
       process.execPath,
       [bin, "default", "--codex-home", dir, "--name", "vayne"],
-      { encoding: "utf8" },
+      { encoding: "utf8", env: spawnEnv },
     );
 
     assert.equal(result.status, 0, result.stderr);
     const rows = spawnSync(
       "sqlite3",
       [dbPath, "select id || '|' || model || '|' || model_provider || '|' || workspace_id || '|' || repo_id || '|' || git_root || '|' || branch from threads;"],
-      { encoding: "utf8" },
+      { encoding: "utf8", env: spawnEnv },
     );
     assert.equal(rows.status, 0, rows.stderr);
     assert.equal(rows.stdout.trim(), "workspace-thread|gpt-5.5|openai|ws-account|repo-account|/Users/fan/project|main");
@@ -566,7 +682,7 @@ describe("api-switch", () => {
         "--model",
         "gpt-5.5",
       ],
-      { input: "sk-one\n", encoding: "utf8" },
+      { input: "sk-one\n", encoding: "utf8", env: spawnEnv },
     );
     assert.equal(setup.status, 0, setup.stderr);
 
@@ -585,11 +701,12 @@ describe("api-switch", () => {
           `insert into threads (id, archived, model, model_provider, rollout_path) values ('stale', 0, 'gpt-5.5', 'vayne', '${rollout.replace(/'/g, "''")}');`,
         ].join(" "),
       ],
-      { encoding: "utf8" },
+      { encoding: "utf8", env: spawnEnv },
     );
 
     const result = spawnSync(process.execPath, [bin, "default", "--codex-home", dir, "--name", "vayne"], {
       encoding: "utf8",
+      env: spawnEnv,
     });
 
     assert.equal(result.status, 0, result.stderr);
@@ -614,7 +731,7 @@ describe("api-switch", () => {
         "--model",
         "gpt-5.5",
       ],
-      { input: "sk-one\n", encoding: "utf8" },
+      { input: "sk-one\n", encoding: "utf8", env: spawnEnv },
     );
     assert.equal(setup.status, 0, setup.stderr);
 
@@ -622,7 +739,7 @@ describe("api-switch", () => {
     const rollout = path.join(dir, "large-rollout.jsonl");
     const firstLine = JSON.stringify({ type: "session_meta", payload: { id: "large-rollout", model_provider: "openai" } });
     const tailMarker = "\n" + JSON.stringify({ type: "response", payload: { text: "tail-marker" } }) + "\n";
-    fs.writeFileSync(rollout, `${firstLine}\n`, { encoding: "utf8" });
+    fs.writeFileSync(rollout, `${firstLine}\n`, { encoding: "utf8", env: spawnEnv });
     const fd = fs.openSync(rollout, "a");
     try {
       const chunk = Buffer.alloc(1024 * 1024, "x");
@@ -643,11 +760,12 @@ describe("api-switch", () => {
           `insert into threads (id, archived, model, model_provider, rollout_path) values ('large-rollout', 0, 'gpt-5.4', 'openai', '${rollout.replace(/'/g, "''")}');`,
         ].join(" "),
       ],
-      { encoding: "utf8" },
+      { encoding: "utf8", env: spawnEnv },
     );
 
     const result = spawnSync(process.execPath, [bin, "default", "--codex-home", dir, "--name", "vayne"], {
       encoding: "utf8",
+      env: spawnEnv,
     });
 
     assert.equal(result.status, 0, result.stderr);
@@ -678,7 +796,7 @@ describe("api-switch", () => {
         "--model",
         "gpt-5.5",
       ],
-      { input: "sk-one\n", encoding: "utf8" },
+      { input: "sk-one\n", encoding: "utf8", env: spawnEnv },
     );
     assert.equal(setup.status, 0, setup.stderr);
 
@@ -698,11 +816,12 @@ describe("api-switch", () => {
           `insert into threads (id, archived, model, model_provider, rollout_path) values ('restored', 0, 'gpt-5.5', 'openai', '${backupRollout.replace(/'/g, "''")}');`,
         ].join(" "),
       ],
-      { encoding: "utf8" },
+      { encoding: "utf8", env: spawnEnv },
     );
 
     const result = spawnSync(process.execPath, [bin, "default", "--codex-home", dir, "--name", "vayne"], {
       encoding: "utf8",
+      env: spawnEnv,
     });
 
     assert.equal(result.status, 0, result.stderr);
@@ -713,6 +832,7 @@ describe("api-switch", () => {
     assert.equal(JSON.parse(fs.readFileSync(rollout, "utf8").split("\n")[0]).payload.model_provider, "openai");
     const rows = spawnSync("sqlite3", [dbPath, "select model_provider || '|' || rollout_path from threads where id = 'restored';"], {
       encoding: "utf8",
+      env: spawnEnv,
     });
     assert.equal(rows.status, 0, rows.stderr);
     assert.equal(rows.stdout.trim(), `openai|${rollout}`);
@@ -734,12 +854,13 @@ describe("api-switch", () => {
         "--model",
         "gpt-5.5",
       ],
-      { input: "sk-one\n", encoding: "utf8" },
+      { input: "sk-one\n", encoding: "utf8", env: spawnEnv },
     );
     assert.equal(setup.status, 0, setup.stderr);
 
     const result = spawnSync(process.execPath, [bin, "list", "--codex-home", dir], {
       encoding: "utf8",
+      env: spawnEnv,
     });
 
     assert.equal(result.status, 0, result.stderr);
@@ -766,7 +887,7 @@ describe("api-switch", () => {
         "--model",
         "gpt-5.5",
       ],
-      { input: "sk-one\n", encoding: "utf8" },
+      { input: "sk-one\n", encoding: "utf8", env: spawnEnv },
     );
     assert.equal(setup.status, 0, setup.stderr);
 
@@ -780,18 +901,19 @@ describe("api-switch", () => {
           "insert into threads (id, archived, model, model_provider, rollout_path) values ('account-thread', 0, 'gpt-5.4', 'openai', '');",
         ].join(" "),
       ],
-      { encoding: "utf8" },
+      { encoding: "utf8", env: spawnEnv },
     );
 
     const result = spawnSync(
       process.execPath,
       [bin, "default", "--codex-home", dir, "--name", "vayne"],
-      { encoding: "utf8" },
+      { encoding: "utf8", env: spawnEnv },
     );
 
     assert.equal(result.status, 0, result.stderr);
     const rows = spawnSync("sqlite3", [dbPath, "select model_provider from threads where id = 'account-thread';"], {
       encoding: "utf8",
+      env: spawnEnv,
     });
     assert.equal(rows.status, 0, rows.stderr);
     assert.equal(rows.stdout.trim(), "openai");
@@ -813,7 +935,7 @@ describe("api-switch", () => {
         "--model",
         "gpt-5.5",
       ],
-      { input: "sk-one\n", encoding: "utf8" },
+      { input: "sk-one\n", encoding: "utf8", env: spawnEnv },
     );
     assert.equal(setup.status, 0, setup.stderr);
 
@@ -832,7 +954,7 @@ describe("api-switch", () => {
           `insert into threads (id, archived, model, model_provider, rollout_path) values ('web-active', 0, 'gpt-5.4', 'openai', '${rollout.replace(/'/g, "''")}');`,
         ].join(" "),
       ],
-      { encoding: "utf8" },
+      { encoding: "utf8", env: spawnEnv },
     );
 
     const server = spawn(process.execPath, [bin, "web", "--codex-home", dir, "--host", "127.0.0.1", "--port", "0", "--no-open"], {
@@ -854,8 +976,9 @@ describe("api-switch", () => {
       assert.match(payload.details.join("\n"), /updated 1 thread model\(s\) to 'gpt-5\.5'/i);
       assert.match(payload.details.join("\n"), /OpenAI base URL: http:\/\/127\.0\.0\.1:\d+\/v1/);
       const rows = spawnSync("sqlite3", [dbPath, "select model_provider from threads where id = 'web-active';"], {
-        encoding: "utf8",
-      });
+      encoding: "utf8",
+      env: spawnEnv,
+    });
       assert.equal(rows.status, 0, rows.stderr);
       assert.equal(rows.stdout.trim(), "openai");
       assert.equal(JSON.parse(fs.readFileSync(rollout, "utf8").split("\n")[0]).payload.model_provider, "openai");
@@ -890,7 +1013,7 @@ describe("api-switch", () => {
         "--model",
         "claude-opus-4-6",
       ],
-      { input: "sk-claude\n", encoding: "utf8" },
+      { input: "sk-claude\n", encoding: "utf8", env: spawnEnv },
     );
     assert.equal(setup.status, 0, setup.stderr);
 
@@ -906,13 +1029,13 @@ describe("api-switch", () => {
           "insert into threads (id, archived, model, model_provider, rollout_path) values ('old-openai', 1, 'gpt-5.5', 'openai', '');",
         ].join(" "),
       ],
-      { encoding: "utf8" },
+      { encoding: "utf8", env: spawnEnv },
     );
 
     const result = spawnSync(
       process.execPath,
       [bin, "default", "--codex-home", dir, "--name", "claude"],
-      { encoding: "utf8" },
+      { encoding: "utf8", env: spawnEnv },
     );
 
     assert.equal(result.status, 0, result.stderr);
@@ -920,7 +1043,7 @@ describe("api-switch", () => {
     const rows = spawnSync(
       "sqlite3",
       [dbPath, "select id || '|' || model || '|' || model_provider from threads order by id;"],
-      { encoding: "utf8" },
+      { encoding: "utf8", env: spawnEnv },
     );
     assert.equal(rows.status, 0, rows.stderr);
     assert.match(rows.stdout, /old-gpt\|claude-opus-4-6\|openai/);
@@ -944,7 +1067,7 @@ describe("api-switch", () => {
         "--model",
         "claude-opus-4-6",
       ],
-      { input: "sk-claude\n", encoding: "utf8" },
+      { input: "sk-claude\n", encoding: "utf8", env: spawnEnv },
     );
     assert.equal(setup.status, 0, setup.stderr);
 
@@ -959,7 +1082,7 @@ describe("api-switch", () => {
           "insert into threads (id, archived, model, model_provider, rollout_path) values ('web-other', 0, 'gpt-5.4-mini', 'openai', '');",
         ].join(" "),
       ],
-      { encoding: "utf8" },
+      { encoding: "utf8", env: spawnEnv },
     );
 
     const server = spawn(process.execPath, [bin, "web", "--codex-home", dir, "--host", "127.0.0.1", "--port", "0", "--no-open"], {
@@ -981,7 +1104,7 @@ describe("api-switch", () => {
       const rows = spawnSync(
         "sqlite3",
         [dbPath, "select id || '|' || model || '|' || model_provider from threads order by id;"],
-        { encoding: "utf8" },
+        { encoding: "utf8", env: spawnEnv },
       );
       assert.equal(rows.status, 0, rows.stderr);
       assert.match(rows.stdout, /web-old\|claude-opus-4-6\|openai/);
@@ -1011,7 +1134,7 @@ describe("api-switch", () => {
         "--model",
         "gpt-5.5",
       ],
-      { input: "sk-one\n", encoding: "utf8" },
+      { input: "sk-one\n", encoding: "utf8", env: spawnEnv },
     );
     assert.equal(setup.status, 0, setup.stderr);
 
@@ -1069,9 +1192,9 @@ describe("api-switch", () => {
     });
     assert.equal(setup.status, 0, setup.stderr);
 
-    const proxy = spawnSync(process.execPath, [bin, "default", "--codex-home", dir, "--name", "vayne"], { encoding: "utf8" });
+    const proxy = spawnSync(process.execPath, [bin, "default", "--codex-home", dir, "--name", "vayne"], { encoding: "utf8", env: spawnEnv });
     assert.equal(proxy.status, 0, proxy.stderr);
-    const account = spawnSync(process.execPath, [bin, "account", "--codex-home", dir], { encoding: "utf8" });
+    const account = spawnSync(process.execPath, [bin, "account", "--codex-home", dir], { encoding: "utf8", env: spawnEnv });
     assert.equal(account.status, 0, account.stderr);
 
     const auth = JSON.parse(fs.readFileSync(path.join(dir, "auth.json"), "utf8"));
@@ -1094,7 +1217,7 @@ describe("api-switch", () => {
         "--model",
         "claude-opus-4-6",
       ],
-      { input: "sk-claude\n", encoding: "utf8" },
+      { input: "sk-claude\n", encoding: "utf8", env: spawnEnv },
     );
     assert.equal(setup.status, 0, setup.stderr);
 
@@ -1126,13 +1249,13 @@ describe("api-switch", () => {
           `insert into threads (id, archived, model, model_provider, rollout_path) values ('current-thread', 0, 'gpt-5.5', 'claude', '${rollout.replace(/'/g, "''")}');`,
         ].join(" "),
       ],
-      { encoding: "utf8" },
+      { encoding: "utf8", env: spawnEnv },
     );
 
     const result = spawnSync(
       process.execPath,
       [bin, "default", "--codex-home", dir, "--name", "claude"],
-      { encoding: "utf8" },
+      { encoding: "utf8", env: spawnEnv },
     );
 
     assert.equal(result.status, 0, result.stderr);
@@ -1164,13 +1287,13 @@ describe("api-switch", () => {
           "insert into threads (id, archived, model, model_provider, rollout_path) values ('archived-relay', 1, 'gpt-5.5', 'vayne', '');",
         ].join(" "),
       ],
-      { encoding: "utf8" },
+      { encoding: "utf8", env: spawnEnv },
     );
 
     const result = spawnSync(
       process.execPath,
       [bin, "account", "--codex-home", dir],
-      { encoding: "utf8" },
+      { encoding: "utf8", env: spawnEnv },
     );
 
     assert.equal(result.status, 0, result.stderr);
@@ -1181,7 +1304,7 @@ describe("api-switch", () => {
     const rows = spawnSync(
       "sqlite3",
       [dbPath, "select id || '|' || model || '|' || model_provider from threads order by id;"],
-      { encoding: "utf8" },
+      { encoding: "utf8", env: spawnEnv },
     );
     assert.equal(rows.status, 0, rows.stderr);
     assert.match(rows.stdout, /active-relay\|gpt-5\.5\|openai/);
@@ -1204,7 +1327,7 @@ describe("api-switch", () => {
           "insert into threads (id, archived, model, model_provider, created_at, updated_at, created_at_ms, updated_at_ms) values ('new-thread', 0, 'gpt-5.5', 'openai', 2, 2, 2000, 2000);",
         ].join(" "),
       ],
-      { encoding: "utf8" },
+      { encoding: "utf8", env: spawnEnv },
     );
 
     const result = spawnSync(
@@ -1219,7 +1342,7 @@ describe("api-switch", () => {
         "--model",
         "claude-opus-4-7",
       ],
-      { encoding: "utf8" },
+      { encoding: "utf8", env: spawnEnv },
     );
 
     assert.equal(result.status, 0, result.stderr);
@@ -1228,7 +1351,7 @@ describe("api-switch", () => {
     const rows = spawnSync(
       "sqlite3",
       [dbPath, "select id || '|' || model || '|' || model_provider from threads order by id;"],
-      { encoding: "utf8" },
+      { encoding: "utf8", env: spawnEnv },
     );
     assert.equal(rows.status, 0, rows.stderr);
     assert.match(rows.stdout, /new-thread\|claude-opus-4-7\|vayne/);
@@ -1239,6 +1362,7 @@ describe("api-switch", () => {
   it("advertises the web UI command", () => {
     const result = spawnSync(process.execPath, [bin, "--help"], {
       encoding: "utf8",
+      env: spawnEnv,
     });
 
     assert.equal(result.status, 0, result.stderr);
@@ -1264,15 +1388,17 @@ describe("api-switch", () => {
 
     try {
       const web = spawnSync(process.execPath, [bin, "web", "--host", "127.0.0.1", "--port", String(port), "--no-open"], {
-        encoding: "utf8",
-      });
+      encoding: "utf8",
+      env: spawnEnv,
+    });
       assert.notEqual(web.status, 0);
       assert.match(web.stderr, /Port is already in use/);
       assert.doesNotMatch(web.stderr, /Unhandled 'error' event/);
 
       const proxy = spawnSync(process.execPath, [bin, "proxy", "--host", "127.0.0.1", "--port", String(port)], {
-        encoding: "utf8",
-      });
+      encoding: "utf8",
+      env: spawnEnv,
+    });
       assert.notEqual(proxy.status, 0);
       assert.match(proxy.stderr, /API Switch proxy port is already in use/);
       assert.doesNotMatch(proxy.stderr, /Unhandled 'error' event/);
@@ -1292,8 +1418,9 @@ describe("api-switch", () => {
       const webUrl = await waitForWebUrl(server);
       const port = new URL(webUrl).port;
       const second = spawnSync(process.execPath, [bin, "web", "--codex-home", dir, "--host", "127.0.0.1", "--port", port, "--no-open"], {
-        encoding: "utf8",
-      });
+      encoding: "utf8",
+      env: spawnEnv,
+    });
       assert.equal(second.status, 0, second.stderr);
       assert.match(second.stdout, /API Switch web UI is already running/);
       assert.doesNotMatch(second.stderr, /Unhandled 'error' event/);
@@ -1339,12 +1466,13 @@ describe("api-switch", () => {
         "--model",
         "claude-opus-4-6",
       ],
-      { input: "sk-claude\n", encoding: "utf8" },
+      { input: "sk-claude\n", encoding: "utf8", env: spawnEnv },
     );
     assert.equal(setup.status, 0, setup.stderr);
 
     const activate = spawnSync(process.execPath, [bin, "default", "--codex-home", dir, "--name", "claude"], {
       encoding: "utf8",
+      env: spawnEnv,
     });
     assert.equal(activate.status, 0, activate.stderr);
 
@@ -1376,6 +1504,231 @@ describe("api-switch", () => {
       assert.equal(responsePayload.model, "claude-opus-4-6");
       assert.equal(responsePayload.output[0].content[0].text, "hello");
       assert.equal(responses.headers.get("x-api-switch-model-family"), "claude");
+    } finally {
+      server.kill();
+      upstream.close();
+    }
+  });
+
+  it("bridges Codex remote compact requests through ordinary upstream responses", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "api-switch-"));
+    let receivedPath = "";
+    let receivedPayload = null;
+    const upstream = http.createServer(async (req, res) => {
+      if (req.method === "POST" && req.url === "/v1/responses") {
+        const chunks = [];
+        for await (const chunk of req) chunks.push(chunk);
+        receivedPath = req.url;
+        receivedPayload = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({
+          id: "resp_bridge_1",
+          object: "response",
+          output: [{
+            type: "message",
+            role: "assistant",
+            content: [{ type: "output_text", text: "compacted conversation state" }],
+          }],
+        }));
+        return;
+      }
+      res.writeHead(404, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "not found" }));
+    });
+    await new Promise((resolve) => upstream.listen(0, "127.0.0.1", resolve));
+
+    const keyFile = path.join(dir, "vayne_api_key");
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(keyFile, "sk-test\n", { mode: 0o600 });
+    fs.mkdirSync(path.join(dir, "codex-switch"), { recursive: true });
+    fs.writeFileSync(path.join(dir, "codex-switch", "profiles.json"), JSON.stringify({
+      version: 1,
+      profiles: {
+        vayne: {
+          name: "vayne",
+          baseUrl: `http://127.0.0.1:${upstream.address().port}/v1`,
+          model: "gpt-5.5",
+          keyFile,
+          reasoningEffort: "medium",
+        },
+      },
+    }));
+    fs.writeFileSync(path.join(dir, "codex-switch", "proxy-settings.json"), JSON.stringify({
+      enabled: true,
+      clients: {
+        codex: { targetProfile: "vayne" },
+        "claude-code": { targetProfile: "" },
+      },
+    }));
+
+    const server = spawn(process.execPath, [bin, "proxy", "--codex-home", dir, "--host", "127.0.0.1", "--port", "0"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    try {
+      const baseUrl = await waitForProxyUrl(server);
+      const response = await fetch(`${baseUrl}/responses/compact`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: "gpt-5.5", input: "hello" }),
+      });
+      const payload = await response.json();
+      assert.equal(response.status, 200);
+      assert.equal(receivedPath, "/v1/responses");
+      assert.equal(receivedPayload.model, "gpt-5.5");
+      assert.equal(receivedPayload.stream, false);
+      assert.equal(payload.object, "response.compaction");
+      assert.equal(payload.output[0].type, "compaction");
+      assert.match(payload.output[0].encrypted_content, /^api-switch-local-compaction:v1:/);
+
+      const followUp = await fetch(`${baseUrl}/responses`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "gpt-5.5",
+          input: payload.output,
+          stream: false,
+        }),
+      });
+      assert.equal(followUp.status, 200);
+      assert.equal(receivedPath, "/v1/responses");
+      assert.equal(receivedPayload.input[0].type, "message");
+      assert.equal(receivedPayload.input[0].role, "user");
+      assert.match(receivedPayload.input[0].content[0].text, /compacted conversation state/);
+      assert.doesNotMatch(JSON.stringify(receivedPayload), /encrypted_content/);
+    } finally {
+      server.kill();
+      upstream.close();
+    }
+  });
+
+  it("strips legacy invalid encrypted compaction content before proxying responses", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "api-switch-"));
+    let receivedPayload = null;
+    const upstream = http.createServer(async (req, res) => {
+      if (req.method === "POST" && req.url === "/v1/responses") {
+        const chunks = [];
+        for await (const chunk of req) chunks.push(chunk);
+        receivedPayload = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+        if (JSON.stringify(receivedPayload).includes("encrypted_content")) {
+          res.writeHead(400, { "content-type": "application/json" });
+          res.end(JSON.stringify({ error: { code: "invalid_encrypted_content" } }));
+          return;
+        }
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ id: "resp_legacy_1", object: "response", output_text: "ok" }));
+        return;
+      }
+      res.writeHead(404, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "not found" }));
+    });
+    await new Promise((resolve) => upstream.listen(0, "127.0.0.1", resolve));
+
+    const keyFile = path.join(dir, "vayne_api_key");
+    fs.mkdirSync(path.join(dir, "codex-switch"), { recursive: true });
+    fs.writeFileSync(keyFile, "sk-test\n", { mode: 0o600 });
+    fs.writeFileSync(path.join(dir, "codex-switch", "profiles.json"), JSON.stringify({
+      version: 1,
+      profiles: {
+        vayne: {
+          name: "vayne",
+          baseUrl: `http://127.0.0.1:${upstream.address().port}/v1`,
+          model: "gpt-5.5",
+          keyFile,
+        },
+      },
+    }));
+    fs.writeFileSync(path.join(dir, "codex-switch", "proxy-settings.json"), JSON.stringify({
+      enabled: true,
+      clients: { codex: { targetProfile: "vayne" }, "claude-code": { targetProfile: "" } },
+    }));
+
+    const server = spawn(process.execPath, [bin, "proxy", "--codex-home", dir, "--host", "127.0.0.1", "--port", "0"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    try {
+      const baseUrl = await waitForProxyUrl(server);
+      const legacySummary = Buffer.from("legacy compact summary from old api-switch", "utf8").toString("base64");
+      const response = await fetch(`${baseUrl}/responses`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "gpt-5.5",
+          input: [{ type: "compaction", encrypted_content: legacySummary }],
+          previous_response: { encrypted_content: "KipDgibberishCg==" },
+          stream: false,
+        }),
+      });
+      const payload = await response.json();
+      assert.equal(response.status, 200);
+      assert.equal(payload.output_text, "ok");
+      const upstreamJson = JSON.stringify(receivedPayload);
+      assert.doesNotMatch(upstreamJson, /encrypted_content/);
+      assert.match(receivedPayload.input[0].content[0].text, /legacy compact summary from old api-switch/);
+      assert.match(upstreamJson, /invalid legacy local state|Previous local compaction content/);
+    } finally {
+      server.kill();
+      upstream.close();
+    }
+  });
+
+  it("accepts WebSocket upgrades on /v1/responses and proxies JSON requests", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "api-switch-"));
+    let receivedPath = "";
+    let receivedPayload = null;
+    const upstream = http.createServer(async (req, res) => {
+      if (req.method === "POST" && req.url === "/v1/responses") {
+        const chunks = [];
+        for await (const chunk of req) chunks.push(chunk);
+        receivedPath = req.url;
+        receivedPayload = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ id: "resp_ws_1", output_text: "hello over ws" }));
+        return;
+      }
+      res.writeHead(404, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "not found" }));
+    });
+    await new Promise((resolve) => upstream.listen(0, "127.0.0.1", resolve));
+
+    const keyFile = path.join(dir, "vayne_api_key");
+    fs.mkdirSync(path.join(dir, "codex-switch"), { recursive: true });
+    fs.writeFileSync(keyFile, "sk-test\n", { mode: 0o600 });
+    fs.writeFileSync(path.join(dir, "codex-switch", "profiles.json"), JSON.stringify({
+      version: 1,
+      profiles: {
+        vayne: {
+          name: "vayne",
+          baseUrl: `http://127.0.0.1:${upstream.address().port}/v1`,
+          model: "gpt-5.5",
+          keyFile,
+          reasoningEffort: "medium",
+        },
+      },
+    }));
+    fs.writeFileSync(path.join(dir, "codex-switch", "proxy-settings.json"), JSON.stringify({
+      enabled: true,
+      clients: {
+        codex: { targetProfile: "vayne" },
+        "claude-code": { targetProfile: "" },
+      },
+    }));
+
+    const server = spawn(process.execPath, [bin, "proxy", "--codex-home", dir, "--host", "127.0.0.1", "--port", "0"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    try {
+      const baseUrl = await waitForProxyUrl(server);
+      const messages = await websocketResponsesRequest(baseUrl.replace(/^http:/, "ws:"), {
+        model: "gpt-5.5",
+        input: "hello",
+        stream: false,
+      });
+      assert.equal(receivedPath, "/v1/responses");
+      assert.equal(receivedPayload.model, "gpt-5.5");
+      assert.match(messages.join("\n"), /hello over ws/);
     } finally {
       server.kill();
       upstream.close();
@@ -1415,11 +1768,12 @@ describe("api-switch", () => {
         "--model",
         "gpt-5.5",
       ],
-      { input: "sk-test\n", encoding: "utf8" },
+      { input: "sk-test\n", encoding: "utf8", env: spawnEnv },
     );
     assert.equal(setup.status, 0, setup.stderr);
     const activate = spawnSync(process.execPath, [bin, "default", "--codex-home", dir, "--name", "vayne"], {
       encoding: "utf8",
+      env: spawnEnv,
     });
     assert.equal(activate.status, 0, activate.stderr);
 
@@ -1702,11 +2056,12 @@ describe("api-switch", () => {
         "--model",
         "gpt-5.5",
       ],
-      { input: "sk-test\n", encoding: "utf8" },
+      { input: "sk-test\n", encoding: "utf8", env: spawnEnv },
     );
     assert.equal(setup.status, 0, setup.stderr);
     const activate = spawnSync(process.execPath, [bin, "default", "--codex-home", dir, "--name", "vayne"], {
       encoding: "utf8",
+      env: spawnEnv,
     });
     assert.equal(activate.status, 0, activate.stderr);
 
@@ -1772,10 +2127,10 @@ describe("api-switch", () => {
         "--model",
         "gpt-5.5",
       ],
-      { input: "sk-test\n", encoding: "utf8" },
+      { input: "sk-test\n", encoding: "utf8", env: spawnEnv },
     );
     assert.equal(setup.status, 0, setup.stderr);
-    const activate = spawnSync(process.execPath, [bin, "default", "--codex-home", dir, "--name", "vayne"], { encoding: "utf8" });
+    const activate = spawnSync(process.execPath, [bin, "default", "--codex-home", dir, "--name", "vayne"], { encoding: "utf8", env: spawnEnv });
     assert.equal(activate.status, 0, activate.stderr);
 
     const server = spawn(process.execPath, [bin, "proxy", "--codex-home", dir, "--host", "127.0.0.1", "--port", "0"], {
@@ -1823,7 +2178,7 @@ describe("api-switch", () => {
       encoding: "utf8",
     });
     assert.equal(setup.status, 0, setup.stderr);
-    const activate = spawnSync(process.execPath, [bin, "default", "--codex-home", dir, "--name", "vayne"], { encoding: "utf8" });
+    const activate = spawnSync(process.execPath, [bin, "default", "--codex-home", dir, "--name", "vayne"], { encoding: "utf8", env: spawnEnv });
     assert.equal(activate.status, 0, activate.stderr);
     const server = spawn(process.execPath, [bin, "proxy", "--codex-home", dir, "--host", "127.0.0.1", "--port", "0"], {
       encoding: "utf8",
@@ -1903,7 +2258,7 @@ describe("api-switch", () => {
       encoding: "utf8",
     });
     assert.equal(setup.status, 0, setup.stderr);
-    const activate = spawnSync(process.execPath, [bin, "default", "--codex-home", dir, "--name", "vayne"], { encoding: "utf8" });
+    const activate = spawnSync(process.execPath, [bin, "default", "--codex-home", dir, "--name", "vayne"], { encoding: "utf8", env: spawnEnv });
     assert.equal(activate.status, 0, activate.stderr);
     const server = spawn(process.execPath, [bin, "proxy", "--codex-home", dir, "--host", "127.0.0.1", "--port", "0"], {
       encoding: "utf8",
@@ -1976,7 +2331,7 @@ describe("api-switch", () => {
       encoding: "utf8",
     });
     assert.equal(setup.status, 0, setup.stderr);
-    const activate = spawnSync(process.execPath, [bin, "default", "--codex-home", dir, "--name", "vayne"], { encoding: "utf8" });
+    const activate = spawnSync(process.execPath, [bin, "default", "--codex-home", dir, "--name", "vayne"], { encoding: "utf8", env: spawnEnv });
     assert.equal(activate.status, 0, activate.stderr);
     const server = spawn(process.execPath, [bin, "proxy", "--codex-home", dir, "--host", "127.0.0.1", "--port", "0"], {
       encoding: "utf8",
@@ -2042,11 +2397,12 @@ describe("api-switch", () => {
         "--model",
         "claude-opus-4-6",
       ],
-      { input: "sk-claude\n", encoding: "utf8" },
+      { input: "sk-claude\n", encoding: "utf8", env: spawnEnv },
     );
     assert.equal(setup.status, 0, setup.stderr);
     const activate = spawnSync(process.execPath, [bin, "default", "--codex-home", dir, "--name", "claude"], {
       encoding: "utf8",
+      env: spawnEnv,
     });
     assert.equal(activate.status, 0, activate.stderr);
 
@@ -2109,7 +2465,7 @@ describe("api-switch", () => {
       encoding: "utf8",
     });
     assert.equal(setup.status, 0, setup.stderr);
-    const activate = spawnSync(process.execPath, [bin, "default", "--codex-home", dir, "--name", "claude"], { encoding: "utf8" });
+    const activate = spawnSync(process.execPath, [bin, "default", "--codex-home", dir, "--name", "claude"], { encoding: "utf8", env: spawnEnv });
     assert.equal(activate.status, 0, activate.stderr);
     const server = spawn(process.execPath, [bin, "proxy", "--codex-home", dir, "--host", "127.0.0.1", "--port", "0"], {
       encoding: "utf8",
@@ -2165,7 +2521,7 @@ describe("api-switch", () => {
       encoding: "utf8",
     });
     assert.equal(setup.status, 0, setup.stderr);
-    const activate = spawnSync(process.execPath, [bin, "default", "--codex-home", dir, "--name", "vayne"], { encoding: "utf8" });
+    const activate = spawnSync(process.execPath, [bin, "default", "--codex-home", dir, "--name", "vayne"], { encoding: "utf8", env: spawnEnv });
     assert.equal(activate.status, 0, activate.stderr);
     const server = spawn(process.execPath, [bin, "proxy", "--codex-home", dir, "--host", "127.0.0.1", "--port", "0"], {
       encoding: "utf8",
@@ -2210,7 +2566,7 @@ describe("api-switch", () => {
       encoding: "utf8",
     });
     assert.equal(setup.status, 0, setup.stderr);
-    const activate = spawnSync(process.execPath, [bin, "default", "--codex-home", dir, "--name", "claude"], { encoding: "utf8" });
+    const activate = spawnSync(process.execPath, [bin, "default", "--codex-home", dir, "--name", "claude"], { encoding: "utf8", env: spawnEnv });
     assert.equal(activate.status, 0, activate.stderr);
     const server = spawn(process.execPath, [bin, "proxy", "--codex-home", dir, "--host", "127.0.0.1", "--port", "0"], {
       encoding: "utf8",
@@ -2272,11 +2628,12 @@ describe("api-switch", () => {
         "--model",
         "claude-opus-4-6",
       ],
-      { input: "sk-claude\n", encoding: "utf8" },
+      { input: "sk-claude\n", encoding: "utf8", env: spawnEnv },
     );
     assert.equal(setup.status, 0, setup.stderr);
     const activate = spawnSync(process.execPath, [bin, "default", "--codex-home", dir, "--name", "claude"], {
       encoding: "utf8",
+      env: spawnEnv,
     });
     assert.equal(activate.status, 0, activate.stderr);
 
@@ -2338,7 +2695,7 @@ describe("api-switch", () => {
       encoding: "utf8",
     });
     assert.equal(setup.status, 0, setup.stderr);
-    const activate = spawnSync(process.execPath, [bin, "default", "--codex-home", dir, "--name", "primary"], { encoding: "utf8" });
+    const activate = spawnSync(process.execPath, [bin, "default", "--codex-home", dir, "--name", "primary"], { encoding: "utf8", env: spawnEnv });
     assert.equal(activate.status, 0, activate.stderr);
     const server = spawn(process.execPath, [bin, "proxy", "--codex-home", dir, "--host", "127.0.0.1", "--port", "0"], {
       encoding: "utf8",
@@ -2393,7 +2750,7 @@ describe("api-switch", () => {
       encoding: "utf8",
     });
     assert.equal(setup.status, 0, setup.stderr);
-    const activate = spawnSync(process.execPath, [bin, "default", "--codex-home", dir, "--name", "primary"], { encoding: "utf8" });
+    const activate = spawnSync(process.execPath, [bin, "default", "--codex-home", dir, "--name", "primary"], { encoding: "utf8", env: spawnEnv });
     assert.equal(activate.status, 0, activate.stderr);
     const server = spawn(process.execPath, [bin, "proxy", "--codex-home", dir, "--host", "127.0.0.1", "--port", "0"], {
       encoding: "utf8",
@@ -2450,9 +2807,9 @@ describe("api-switch", () => {
       encoding: "utf8",
     });
     assert.equal(setupClaude.status, 0, setupClaude.stderr);
-    const activate = spawnSync(process.execPath, [bin, "default", "--codex-home", dir, "--name", "gpt"], { encoding: "utf8" });
+    const activate = spawnSync(process.execPath, [bin, "default", "--codex-home", dir, "--name", "gpt"], { encoding: "utf8", env: spawnEnv });
     assert.equal(activate.status, 0, activate.stderr);
-    const route = spawnSync(process.execPath, [bin, "route", "--codex-home", dir, "--client", "codex", "--model", "gpt-5.5", "--profile", "claude", "--upstream-model", "claude-opus-4-6"], { encoding: "utf8" });
+    const route = spawnSync(process.execPath, [bin, "route", "--codex-home", dir, "--client", "codex", "--model", "gpt-5.5", "--profile", "claude", "--upstream-model", "claude-opus-4-6"], { encoding: "utf8", env: spawnEnv });
     assert.equal(route.status, 0, route.stderr);
 
     const server = spawn(process.execPath, [bin, "proxy", "--codex-home", dir, "--host", "127.0.0.1", "--port", "0"], {
@@ -2502,7 +2859,7 @@ describe("api-switch", () => {
       encoding: "utf8",
     });
     assert.equal(setup.status, 0, setup.stderr);
-    const activate = spawnSync(process.execPath, [bin, "default", "--codex-home", dir, "--name", "primary"], { encoding: "utf8" });
+    const activate = spawnSync(process.execPath, [bin, "default", "--codex-home", dir, "--name", "primary"], { encoding: "utf8", env: spawnEnv });
     assert.equal(activate.status, 0, activate.stderr);
     const server = spawn(process.execPath, [bin, "proxy", "--codex-home", dir, "--host", "127.0.0.1", "--port", "0"], {
       encoding: "utf8",
@@ -2545,14 +2902,14 @@ describe("api-switch", () => {
       encoding: "utf8",
     });
     assert.equal(setup.status, 0, setup.stderr);
-    const proxy = spawnSync(process.execPath, [bin, "claude-proxy", "--codex-home", dir, "--claude-home", claudeDir, "--name", "claude"], { encoding: "utf8" });
+    const proxy = spawnSync(process.execPath, [bin, "claude-proxy", "--codex-home", dir, "--claude-home", claudeDir, "--name", "claude"], { encoding: "utf8", env: spawnEnv });
     assert.equal(proxy.status, 0, proxy.stderr);
     let settings = JSON.parse(fs.readFileSync(path.join(claudeDir, "settings.json"), "utf8"));
     assert.equal(settings.env.ANTHROPIC_BASE_URL, "http://127.0.0.1:18600");
     assert.equal(settings.env.ANTHROPIC_AUTH_TOKEN, "api-switch");
     let proxySettings = JSON.parse(fs.readFileSync(path.join(dir, "codex-switch", "proxy-settings.json"), "utf8"));
     assert.equal(proxySettings.clients["claude-code"].targetProfile, "claude");
-    const account = spawnSync(process.execPath, [bin, "claude-account", "--codex-home", dir, "--claude-home", claudeDir], { encoding: "utf8" });
+    const account = spawnSync(process.execPath, [bin, "claude-account", "--codex-home", dir, "--claude-home", claudeDir], { encoding: "utf8", env: spawnEnv });
     assert.equal(account.status, 0, account.stderr);
     settings = JSON.parse(fs.readFileSync(path.join(claudeDir, "settings.json"), "utf8"));
     assert.equal(settings.env.ANTHROPIC_BASE_URL, "https://api.anthropic.example");
@@ -2586,9 +2943,9 @@ describe("api-switch", () => {
     });
     assert.equal(setup.status, 0, setup.stderr);
 
-    const proxy = spawnSync(process.execPath, [bin, "claude-proxy", "--codex-home", dir, "--claude-home", claudeDir, "--name", "claude"], { encoding: "utf8" });
+    const proxy = spawnSync(process.execPath, [bin, "claude-proxy", "--codex-home", dir, "--claude-home", claudeDir, "--name", "claude"], { encoding: "utf8", env: spawnEnv });
     assert.equal(proxy.status, 0, proxy.stderr);
-    const account = spawnSync(process.execPath, [bin, "claude-account", "--codex-home", dir, "--claude-home", claudeDir], { encoding: "utf8" });
+    const account = spawnSync(process.execPath, [bin, "claude-account", "--codex-home", dir, "--claude-home", claudeDir], { encoding: "utf8", env: spawnEnv });
     assert.equal(account.status, 0, account.stderr);
 
     const settings = JSON.parse(fs.readFileSync(path.join(claudeDir, "settings.json"), "utf8"));
@@ -2606,7 +2963,7 @@ describe("api-switch", () => {
     assert.equal(setup.status, 0, setup.stderr);
     fs.unlinkSync(path.join(dir, "claude_api_key"));
 
-    const proxy = spawnSync(process.execPath, [bin, "claude-proxy", "--codex-home", dir, "--claude-home", claudeDir, "--name", "claude"], { encoding: "utf8" });
+    const proxy = spawnSync(process.execPath, [bin, "claude-proxy", "--codex-home", dir, "--claude-home", claudeDir, "--name", "claude"], { encoding: "utf8", env: spawnEnv });
 
     assert.notEqual(proxy.status, 0);
     assert.match(proxy.stderr, /API key not found/);
@@ -2626,9 +2983,9 @@ describe("api-switch", () => {
       encoding: "utf8",
     });
 
-    const codex = spawnSync(process.execPath, [bin, "default", "--codex-home", dir, "--name", "gpt"], { encoding: "utf8" });
+    const codex = spawnSync(process.execPath, [bin, "default", "--codex-home", dir, "--name", "gpt"], { encoding: "utf8", env: spawnEnv });
     assert.equal(codex.status, 0, codex.stderr);
-    const claude = spawnSync(process.execPath, [bin, "claude-proxy", "--codex-home", dir, "--claude-home", claudeDir, "--name", "claude"], { encoding: "utf8" });
+    const claude = spawnSync(process.execPath, [bin, "claude-proxy", "--codex-home", dir, "--claude-home", claudeDir, "--name", "claude"], { encoding: "utf8", env: spawnEnv });
     assert.equal(claude.status, 0, claude.stderr);
 
     const proxySettings = JSON.parse(fs.readFileSync(path.join(dir, "codex-switch", "proxy-settings.json"), "utf8"));
@@ -2660,7 +3017,7 @@ describe("api-switch", () => {
     });
     assert.equal(setup.status, 0, setup.stderr);
     const claudeDir = fs.mkdtempSync(path.join(os.tmpdir(), "claude-home-"));
-    const activate = spawnSync(process.execPath, [bin, "claude-proxy", "--codex-home", dir, "--claude-home", claudeDir, "--name", "claude"], { encoding: "utf8" });
+    const activate = spawnSync(process.execPath, [bin, "claude-proxy", "--codex-home", dir, "--claude-home", claudeDir, "--name", "claude"], { encoding: "utf8", env: spawnEnv });
     assert.equal(activate.status, 0, activate.stderr);
     const server = spawn(process.execPath, [bin, "proxy", "--codex-home", dir, "--host", "127.0.0.1", "--port", "0"], {
       encoding: "utf8",
@@ -2727,7 +3084,7 @@ describe("api-switch", () => {
     });
     assert.equal(setup.status, 0, setup.stderr);
     const claudeDir = fs.mkdtempSync(path.join(os.tmpdir(), "claude-home-"));
-    const activate = spawnSync(process.execPath, [bin, "claude-proxy", "--codex-home", dir, "--claude-home", claudeDir, "--name", "claude"], { encoding: "utf8" });
+    const activate = spawnSync(process.execPath, [bin, "claude-proxy", "--codex-home", dir, "--claude-home", claudeDir, "--name", "claude"], { encoding: "utf8", env: spawnEnv });
     assert.equal(activate.status, 0, activate.stderr);
     const server = spawn(process.execPath, [bin, "proxy", "--codex-home", dir, "--host", "127.0.0.1", "--port", "0"], {
       encoding: "utf8",
