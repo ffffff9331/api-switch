@@ -1254,6 +1254,54 @@ describe("api-switch", () => {
     assert.match(result.stdout, /api-switch thread-model --model <model>/);
   });
 
+  it("reports a friendly error when the default port is already in use", async () => {
+    const blocker = http.createServer((req, res) => {
+      res.writeHead(200, { "content-type": "text/plain" });
+      res.end("busy");
+    });
+    await new Promise((resolve) => blocker.listen(0, "127.0.0.1", resolve));
+    const port = blocker.address().port;
+
+    try {
+      const web = spawnSync(process.execPath, [bin, "web", "--host", "127.0.0.1", "--port", String(port), "--no-open"], {
+        encoding: "utf8",
+      });
+      assert.notEqual(web.status, 0);
+      assert.match(web.stderr, /Port is already in use/);
+      assert.doesNotMatch(web.stderr, /Unhandled 'error' event/);
+
+      const proxy = spawnSync(process.execPath, [bin, "proxy", "--host", "127.0.0.1", "--port", String(port)], {
+        encoding: "utf8",
+      });
+      assert.notEqual(proxy.status, 0);
+      assert.match(proxy.stderr, /API Switch proxy port is already in use/);
+      assert.doesNotMatch(proxy.stderr, /Unhandled 'error' event/);
+    } finally {
+      blocker.close();
+    }
+  });
+
+  it("reuses an already-running API Switch web server", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-switch-"));
+    const server = spawn(process.execPath, [bin, "web", "--codex-home", dir, "--host", "127.0.0.1", "--port", "0", "--no-open"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+
+    try {
+      const webUrl = await waitForWebUrl(server);
+      const port = new URL(webUrl).port;
+      const second = spawnSync(process.execPath, [bin, "web", "--codex-home", dir, "--host", "127.0.0.1", "--port", port, "--no-open"], {
+        encoding: "utf8",
+      });
+      assert.equal(second.status, 0, second.stderr);
+      assert.match(second.stdout, /API Switch web UI is already running/);
+      assert.doesNotMatch(second.stderr, /Unhandled 'error' event/);
+    } finally {
+      server.kill();
+    }
+  });
+
   it("starts a local proxy that exposes health, models, and responses", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-switch-"));
     const upstream = http.createServer(async (req, res) => {

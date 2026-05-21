@@ -3438,6 +3438,21 @@ function startWeb(args) {
     }
   });
 
+  server.on("error", async (error) => {
+    if (error && error.code === "EADDRINUSE") {
+      const url = `http://${host}:${port}`;
+      if (await isApiSwitchRunning(url)) {
+        console.log(`API Switch web UI is already running: ${url}`);
+        if (!args.noOpen) openBrowser(url);
+        process.exit(0);
+      }
+      console.error(`Port is already in use: ${url}`);
+      console.error("Stop the process using that port or start API Switch with --port <port>.");
+      process.exit(1);
+    }
+    console.error(error && error.stack ? error.stack : String(error));
+    process.exit(1);
+  });
   server.listen(port, host, () => {
     const address = server.address();
     const url = `http://${host}:${address.port}`;
@@ -3446,6 +3461,20 @@ function startWeb(args) {
       openBrowser(url);
     }
   });
+}
+
+async function isApiSwitchRunning(url) {
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 1000);
+    const response = await fetch(`${url}/health`, { signal: controller.signal });
+    clearTimeout(timer);
+    if (!response.ok) return false;
+    const payload = await response.json();
+    return Boolean(payload && payload.ok === true && payload.client === "codex");
+  } catch {
+    return false;
+  }
 }
 
 function openBrowser(url) {
