@@ -616,19 +616,35 @@ function serviceUninstall() {
 }
 
 function serviceStatus() {
+  const status = serviceStatusData();
+  console.log(`LaunchAgent: ${status.installed ? "installed" : "not installed"}`);
+  console.log(`Path: ${status.path}`);
+  if (status.platform === "darwin") {
+    console.log(`Status: ${status.loaded ? `loaded${status.pid ? `, pid ${status.pid}` : ""}` : "not loaded"}`);
+  }
+}
+
+function serviceStatusData() {
   const plistPath = launchAgentPath();
-  console.log(`LaunchAgent: ${fs.existsSync(plistPath) ? "installed" : "not installed"}`);
-  console.log(`Path: ${plistPath}`);
+  const result = {
+    platform: process.platform,
+    installed: fs.existsSync(plistPath),
+    loaded: false,
+    pid: null,
+    path: plistPath,
+  };
   if (process.platform === "darwin") {
     const domain = `gui/${process.getuid()}`;
     try {
       const output = execFileSync("launchctl", ["print", `${domain}/com.api-switch.web`], { encoding: "utf8" });
       const pid = output.match(/\bpid = (\d+)/);
-      console.log(`Status: loaded${pid ? `, pid ${pid[1]}` : ""}`);
+      result.loaded = true;
+      result.pid = pid ? pid[1] : null;
     } catch (_) {
-      console.log("Status: not loaded");
+      result.loaded = false;
     }
   }
+  return result;
 }
 
 function listCommand(args) {
@@ -1429,6 +1445,16 @@ function chatCompletionsUrl(baseUrl) {
   return url.toString();
 }
 
+function messagesUrl(baseUrl) {
+  const url = new URL(baseUrl);
+  let pathname = url.pathname.replace(/\/+$/, "");
+  if (!pathname.endsWith("/messages")) pathname = `${pathname}/messages`;
+  url.pathname = pathname;
+  url.search = "";
+  url.hash = "";
+  return url.toString();
+}
+
 function modelIdsFromResponse(payload) {
   const list = Array.isArray(payload) ? payload : payload.data;
   if (!Array.isArray(list)) {
@@ -1669,6 +1695,74 @@ async function profileHealth(profile) {
 async function profilesHealth(codexHome) {
   const profiles = listProfiles(codexHome);
   return Promise.all(profiles.map((profile) => profileHealth(profile)));
+}
+
+async function probeJsonEndpoint(name, url, init) {
+  const startedAt = Date.now();
+  try {
+    const response = await fetch(url, {
+      ...init,
+      signal: AbortSignal.timeout(12000),
+    });
+    const text = await response.text();
+    return {
+      name,
+      ok: response.ok,
+      status: response.status,
+      durationMs: Date.now() - startedAt,
+      error: response.ok ? "" : parseErrorMessage(text) || text.slice(0, 180),
+    };
+  } catch (error) {
+    return {
+      name,
+      ok: false,
+      status: 0,
+      durationMs: Date.now() - startedAt,
+      error: error.message,
+    };
+  }
+}
+
+async function detectProfileCapabilities(profile) {
+  if (!profile) throw new Error("Relay profile is required.");
+  const apiKey = profileApiKey(profile);
+  const headers = {
+    authorization: `Bearer ${apiKey}`,
+    "content-type": "application/json",
+    accept: "application/json",
+  };
+  const model = profile.model;
+  const probes = await Promise.all([
+    probeJsonEndpoint("models", modelsUrl(profile.baseUrl), {
+      method: "GET",
+      headers: { authorization: `Bearer ${apiKey}`, accept: "application/json" },
+    }),
+    probeJsonEndpoint("responses", responsesUrl(profile.baseUrl), {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ model, input: "ok", max_output_tokens: 1, stream: false }),
+    }),
+    probeJsonEndpoint("chat_completions", chatCompletionsUrl(profile.baseUrl), {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ model, messages: [{ role: "user", content: "ok" }], max_tokens: 1, stream: false }),
+    }),
+    probeJsonEndpoint("messages", messagesUrl(profile.baseUrl), {
+      method: "POST",
+      headers: {
+        ...headers,
+        "anthropic-version": "2023-06-01",
+      },
+      body: JSON.stringify({ model, max_tokens: 1, messages: [{ role: "user", content: "ok" }], stream: false }),
+    }),
+  ]);
+  return {
+    name: profile.name,
+    model,
+    baseUrl: profile.baseUrl,
+    probes,
+    capabilities: modelCapabilities(model),
+  };
 }
 
 function startProxy(args) {
@@ -2285,8 +2379,10 @@ function htmlPage() {
             <div class="service-status"><span id="proxy-dot" class="status-dot"></span><span id="proxy-status"></span></div>
           </div>
           <div class="service-actions">
+            <button type="button" class="secondary" id="service-status-refresh" data-i18n="serviceStatus">Service Status</button>
             <button type="button" class="danger" id="account-mode" data-i18n="accountMode">Use account mode</button>
           </div>
+          <p class="hint" id="service-status-detail"></p>
           <p class="hint"><strong data-i18n="restartCodex">Choose a client for each relay profile</strong><br><span data-i18n="restartCodexHint">Use for Codex writes Codex API settings and restarts Codex. Use for Claude Code writes Claude Code proxy settings.</span></p>
           <div class="message" id="message"></div>
       </section>
@@ -2379,6 +2475,16 @@ function htmlPage() {
             </div>
             <div class="mini-list" id="health-list"></div>
         </section>
+        <section class="mini-panel">
+            <div class="target-title">
+              <h3 data-i18n="requestsTitle">Recent requests</h3>
+              <p data-i18n="requestsHint">Only real proxy traffic is shown.</p>
+            </div>
+            <div class="service-actions">
+              <button type="button" class="secondary" id="requests-refresh" data-i18n="requestsRefresh">Refresh</button>
+            </div>
+            <div class="mini-list" id="request-list"></div>
+        </section>
       </div>
     </div>
   </main>
@@ -2401,6 +2507,8 @@ function htmlPage() {
     const routeProfile = document.querySelector("#route-profile");
     const routesList = document.querySelector("#routes-list");
     const healthList = document.querySelector("#health-list");
+    const requestList = document.querySelector("#request-list");
+    const serviceStatusDetail = document.querySelector("#service-status-detail");
     let loadedModels = [];
     let lang = localStorage.getItem("api-switch-lang") || ((navigator.language || "").startsWith("zh") ? "zh" : "en");
 
@@ -2421,6 +2529,11 @@ function htmlPage() {
         proxyStart: "Start",
         proxyStop: "Stop",
         proxyRestart: "Restart",
+        serviceStatus: "Service Status",
+        serviceInstalled: "Service installed",
+        serviceNotInstalled: "Service not installed",
+        serviceLoaded: "loaded",
+        serviceNotLoaded: "not loaded",
         accountMode: "Use account mode",
         accountConfirm: "Switch Codex back to account mode and restart the app?",
         proxyOn: "Running",
@@ -2439,6 +2552,13 @@ function htmlPage() {
         healthRefresh: "Refresh list",
         healthLoading: "Loading saved profiles...",
         noHealth: "No saved profiles.",
+        requestsTitle: "Recent requests",
+        requestsHint: "Only real proxy traffic is shown.",
+        requestsRefresh: "Refresh",
+        requestsEmpty: "No proxy requests yet.",
+        capabilityCheck: "Detect",
+        capabilityChecking: "Detecting relay capabilities...",
+        capabilityDone: "Capability detection completed for {name}.",
         profileTitle: "Profile",
         nameLabel: "Name",
         namePlaceholder: "e.g. vayne",
@@ -2491,6 +2611,11 @@ function htmlPage() {
         proxyStart: "开启",
         proxyStop: "关闭",
         proxyRestart: "重启",
+        serviceStatus: "常驻服务状态",
+        serviceInstalled: "已安装服务",
+        serviceNotInstalled: "未安装服务",
+        serviceLoaded: "已加载",
+        serviceNotLoaded: "未加载",
         accountMode: "切回账号模式",
         accountConfirm: "确定要切回 Codex 账号模式并重启应用吗？",
         proxyOn: "运行中",
@@ -2509,6 +2634,13 @@ function htmlPage() {
         healthRefresh: "刷新列表",
         healthLoading: "正在读取本地配置...",
         noHealth: "暂无已保存配置。",
+        requestsTitle: "最近请求",
+        requestsHint: "只展示真实发生过的代理流量。",
+        requestsRefresh: "刷新",
+        requestsEmpty: "暂无代理请求。",
+        capabilityCheck: "探测能力",
+        capabilityChecking: "正在探测中转能力...",
+        capabilityDone: "已完成「{name}」的能力探测。",
         profileTitle: "配置",
         nameLabel: "名称",
         namePlaceholder: "例如 vayne",
@@ -2643,6 +2775,7 @@ function htmlPage() {
       const claudeLabel = payload.activeClaudeProfile ? "Claude Code: " + payload.activeClaudeProfile : "Claude Code: -";
       proxyStatus.textContent = (payload.enabled ? t("proxyOn") : t("proxyOff")) + " · " + codexLabel + " · " + claudeLabel;
       proxyDot.className = "status-dot " + (payload.enabled ? "on" : "off");
+      renderRequests(payload.recent || []);
     }
 
     async function loadProxyStatus() {
@@ -2665,6 +2798,50 @@ function htmlPage() {
       updateModelLabel();
       updateCommand();
       setMessage(t("editing", { name: profile.name }));
+    }
+
+    function renderServiceStatus(payload) {
+      const installed = payload.installed ? t("serviceInstalled") : t("serviceNotInstalled");
+      const loaded = payload.loaded ? t("serviceLoaded") + (payload.pid ? " · pid " + payload.pid : "") : t("serviceNotLoaded");
+      serviceStatusDetail.textContent = installed + " · " + loaded;
+    }
+
+    async function loadServiceStatus() {
+      try {
+        const response = await fetch("/api/service/status");
+        const payload = await response.json();
+        if (!response.ok) throw new Error(payload.error || "Request failed.");
+        renderServiceStatus(payload);
+      } catch (error) {
+        serviceStatusDetail.textContent = error.message;
+      }
+    }
+
+    function renderRequests(requests) {
+      requestList.innerHTML = requests.length
+        ? requests.slice(0, 12).map((entry) => {
+          const at = entry.at ? new Date(entry.at).toLocaleTimeString() : "";
+          const ok = entry.ok === false ? "fail" : "ok";
+          const status = entry.status || "";
+          const duration = entry.durationMs === undefined ? "" : " · " + entry.durationMs + "ms";
+          const model = entry.upstreamModel || entry.model || "";
+          const profile = entry.profile ? " · " + entry.profile : "";
+          return '<div class="mini-row">' +
+            '<div>' +
+              '<strong><span class="health-dot ' + ok + '"></span>' + escapeHtml(model || "request") + '</strong>' +
+              '<span>' + escapeHtml([at, entry.client || "", entry.family || ""].filter(Boolean).join(" · ") + profile) + '</span>' +
+            '</div>' +
+            '<span>' + escapeHtml(String(status) + duration) + '</span>' +
+          '</div>';
+        }).join("")
+        : '<div class="hint">' + escapeHtml(t("requestsEmpty")) + '</div>';
+    }
+
+    function formatCapabilities(payload) {
+      const probes = Array.isArray(payload.probes) ? payload.probes : [];
+      return probes.map((probe) => {
+        return probe.name + ": " + (probe.ok ? "ok" : "fail") + " (" + (probe.status || 0) + ", " + probe.durationMs + "ms" + (probe.error ? ", " + probe.error : "") + ")";
+      }).join("\\n");
     }
 
     function renderModels(models) {
@@ -2712,6 +2889,7 @@ function htmlPage() {
             '<button class="secondary" data-action="codex">' + escapeHtml(t("useCodex")) + '</button>' +
             '<button class="secondary" data-action="claude">' + escapeHtml(t("useClaude")) + '</button>' +
             '<button class="secondary" data-action="test">' + escapeHtml(t("test")) + '</button>' +
+            '<button class="secondary" data-action="capabilities">' + escapeHtml(t("capabilityCheck")) + '</button>' +
             '<button class="danger" data-action="remove">' + escapeHtml(t("remove")) + '</button>' +
           '</div>' +
         '</div>';
@@ -2731,6 +2909,15 @@ function htmlPage() {
             try {
               const payload = await post("/api/test", { name: profile.name });
               setMessage(payload.message);
+            } catch (error) {
+              setMessage(error.message, true);
+            }
+          }
+          if (button.dataset.action === "capabilities") {
+            setMessage(t("capabilityChecking"));
+            try {
+              const payload = await post("/api/profile/capabilities", { name: profile.name });
+              setMessage(t("capabilityDone", { name: profile.name }) + "\\n" + formatCapabilities(payload));
             } catch (error) {
               setMessage(error.message, true);
             }
@@ -2856,6 +3043,17 @@ function htmlPage() {
       }
     }
 
+    async function loadRequests() {
+      try {
+        const response = await fetch("/api/logs");
+        const payload = await response.json();
+        if (!response.ok) throw new Error(payload.error || "Request failed.");
+        renderRequests(payload.recent || []);
+      } catch (error) {
+        requestList.innerHTML = '<div class="hint">' + escapeHtml(error.message) + '</div>';
+      }
+    }
+
     nameInput.addEventListener("input", updateCommand);
     toggleConfig.addEventListener("click", () => {
       const nextOpen = !configPanel.classList.contains("open");
@@ -2960,6 +3158,12 @@ function htmlPage() {
     document.querySelector("#health-refresh").addEventListener("click", async () => {
       await loadHealth();
     });
+    document.querySelector("#requests-refresh").addEventListener("click", async () => {
+      await loadRequests();
+    });
+    document.querySelector("#service-status-refresh").addEventListener("click", async () => {
+      await loadServiceStatus();
+    });
 
     document.querySelector("#lang-zh").addEventListener("click", () => {
       lang = "zh";
@@ -2976,6 +3180,8 @@ function htmlPage() {
     applyLanguage();
     setInterval(loadProxyStatus, 4000);
     loadHealth();
+    loadRequests();
+    loadServiceStatus();
     loadProfiles().catch((error) => {
       profilesEl.innerHTML = '<div class="hint">' + error.message + '</div>';
     });
@@ -3261,6 +3467,22 @@ function startWeb(args) {
 
       if (req.method === "GET" && url.pathname === "/api/health/profiles") {
         sendJson(res, 200, { profiles: await profilesHealth(codexHome) });
+        return;
+      }
+
+      if (req.method === "GET" && url.pathname === "/api/service/status") {
+        sendJson(res, 200, serviceStatusData());
+        return;
+      }
+
+      if (req.method === "POST" && url.pathname === "/api/profile/capabilities") {
+        const payload = await readJson(req);
+        const profile = getManagedProfile(codexHome, String(payload.name || ""));
+        if (!profile) {
+          sendJson(res, 404, { error: "Profile not found." });
+          return;
+        }
+        sendJson(res, 200, await detectProfileCapabilities(profile));
         return;
       }
 

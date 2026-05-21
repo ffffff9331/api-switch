@@ -1508,6 +1508,9 @@ describe("api-switch", () => {
       assert.match(html, /id="routes-list"/);
       assert.match(html, /id="health-list"/);
       assert.match(html, /id="health-refresh"/);
+      assert.match(html, /id="service-status-refresh"/);
+      assert.match(html, /id="request-list"/);
+      assert.match(html, /data-action="capabilities"/);
       assert.match(html, /Use for Codex/);
       assert.match(html, /Use for Claude Code/);
       assert.match(html, /restartCodex: true/);
@@ -1546,6 +1549,10 @@ describe("api-switch", () => {
       const statusPayload = await status.json();
       assert.equal(statusPayload.clients["claude-code"].targetProfile, "claude");
       assert.equal(statusPayload.activeClaudeProfile, "claude");
+      const service = await fetch(`${webUrl}/api/service/status`);
+      const servicePayload = await service.json();
+      assert.equal(service.status, 200);
+      assert.equal(typeof servicePayload.installed, "boolean");
     } finally {
       server.kill();
       upstream.close();
@@ -1589,6 +1596,66 @@ describe("api-switch", () => {
       assert.equal(payload.profiles[0].ok, true);
       assert.equal(payload.profiles[0].family, "openai");
       assert.equal(payload.profiles[0].status, 200);
+    } finally {
+      server.kill();
+      upstream.close();
+    }
+  });
+
+  it("detects profile endpoint capabilities on demand", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-switch-"));
+    const hits = [];
+    const upstream = http.createServer(async (req, res) => {
+      hits.push(`${req.method} ${req.url}`);
+      if (req.method === "GET" && req.url === "/v1/models") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ data: [{ id: "gpt-5.5" }] }));
+        return;
+      }
+      if (req.method === "POST" && req.url === "/v1/responses") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ id: "resp_probe", object: "response", output: [] }));
+        return;
+      }
+      if (req.method === "POST" && req.url === "/v1/chat/completions") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ id: "chat_probe", object: "chat.completion", choices: [{ message: { role: "assistant", content: "ok" } }] }));
+        return;
+      }
+      if (req.method === "POST" && req.url === "/v1/messages") {
+        res.writeHead(404, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: "messages unavailable" }));
+        return;
+      }
+      res.writeHead(404, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "not found" }));
+    });
+    await new Promise((resolve) => upstream.listen(0, "127.0.0.1", resolve));
+    const setup = spawnSync(process.execPath, [bin, "setup", "--codex-home", dir, "--name", "vayne", "--base-url", `http://127.0.0.1:${upstream.address().port}/v1`, "--model", "gpt-5.5"], {
+      input: "sk-test\n",
+      encoding: "utf8",
+    });
+    assert.equal(setup.status, 0, setup.stderr);
+    const server = spawn(process.execPath, [bin, "web", "--codex-home", dir, "--host", "127.0.0.1", "--port", "0", "--no-open"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+
+    try {
+      const webUrl = await waitForWebUrl(server);
+      const response = await fetch(`${webUrl}/api/profile/capabilities`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: "vayne" }),
+      });
+      const payload = await response.json();
+      assert.equal(response.status, 200);
+      assert.equal(payload.name, "vayne");
+      assert.equal(payload.probes.find((probe) => probe.name === "models").ok, true);
+      assert.equal(payload.probes.find((probe) => probe.name === "responses").ok, true);
+      assert.equal(payload.probes.find((probe) => probe.name === "chat_completions").ok, true);
+      assert.equal(payload.probes.find((probe) => probe.name === "messages").ok, false);
+      assert.deepEqual(hits.sort(), ["GET /v1/models", "POST /v1/chat/completions", "POST /v1/messages", "POST /v1/responses"].sort());
     } finally {
       server.kill();
       upstream.close();
