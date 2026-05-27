@@ -71,7 +71,7 @@ Web UI 功能：
 给 Codex 使用某个中转配置：
 
 ```bash
-api-switch default --name vayne
+api-switch default --name my-relay
 ```
 
 切回 Codex 账号登录：
@@ -83,7 +83,7 @@ api-switch account
 带应用重启：
 
 ```bash
-api-switch default --name vayne --restart-codex
+api-switch default --name my-relay --restart-codex
 api-switch account --restart-codex
 ```
 
@@ -96,7 +96,7 @@ API Switch 不覆盖 Codex 内置的 `openai` provider，只把 `openai_base_url
 给 Claude Code 使用某个中转配置：
 
 ```bash
-api-switch claude-proxy --name vayne
+api-switch claude-proxy --name my-relay
 ```
 
 移除 Claude Code 代理配置：

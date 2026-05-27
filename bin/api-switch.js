@@ -26,7 +26,7 @@ Configure Codex Desktop and Claude Code to use a local proxy backed by relay pro
 
 Usage:
   api-switch setup --name <profile> --base-url <url> --model <model>
-  api-switch setup --name vayne --base-url https://api.example.com/v1 --model gpt-5.5
+  api-switch setup --name my-relay --base-url https://api.example.com/v1 --model gpt-5.5
   api-switch setup --name xiaomi --type official_subscription --base-url https://token-plan-sgp.xiaomimimo.com/v1 --anthropic-base-url https://token-plan-sgp.xiaomimimo.com/anthropic --model mimo-v2.5-pro
   api-switch model --name <profile> --model <model>
   api-switch thread-model --model <model> [--provider <provider>] [--thread <id>]
@@ -2868,7 +2868,7 @@ function htmlPage() {
         capabilityDone: "Capability detection completed for {name}.",
         profileTitle: "Profile",
         nameLabel: "Name",
-        namePlaceholder: "e.g. vayne",
+        namePlaceholder: "e.g. my-relay",
         profileTypeLabel: "Profile type",
         profileTypeRelay: "Relay / proxy",
         profileTypeOfficialSubscription: "Official subscription API key",
@@ -2972,7 +2972,7 @@ function htmlPage() {
         capabilityDone: "已完成「{name}」的能力探测。",
         profileTitle: "配置",
         nameLabel: "名称",
-        namePlaceholder: "例如 vayne",
+        namePlaceholder: "例如 my-relay",
         profileTypeLabel: "配置类型",
         profileTypeRelay: "中转站 / 代理",
         profileTypeOfficialSubscription: "官方订阅 API Key",
