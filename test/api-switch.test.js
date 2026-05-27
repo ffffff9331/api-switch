@@ -206,6 +206,23 @@ describe("api-switch", () => {
     assert.equal(payload.tools[0].function.parameters.additionalProperties, true);
   });
 
+  it("can downgrade image parts to text-only chat payloads for text-only relays", () => {
+    const payload = responsesToChatPayload({
+      model: "mimo-v2.5-pro",
+      input: [{
+        role: "user",
+        content: [
+          { type: "input_text", text: "describe" },
+          { type: "input_image", image_url: { url: "https://example.com/a.png" } },
+        ],
+      }],
+    }, "mimo-v2.5-pro", { textOnlyImages: true });
+
+    assert.equal(typeof payload.messages[0].content, "string");
+    assert.match(payload.messages[0].content, /describe/);
+    assert.match(payload.messages[0].content, /Image input omitted/);
+  });
+
   it("writes a relay profile outside Codex config", () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "api-switch-"));
     const result = spawnSync(
@@ -914,7 +931,74 @@ describe("api-switch", () => {
     assert.match(result.stdout, / account/);
     assert.match(result.stdout, / vayne/);
     assert.match(result.stdout, /model: gpt-5\.5/);
+    assert.match(result.stdout, /type: relay/);
     assert.match(result.stdout, /base_url: https:\/\/api\.vayne\.cc\.cd\/v1/);
+  });
+
+  it("lists official subscription profiles with separate OpenAI and Anthropic bases", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "api-switch-"));
+    const setup = spawnSync(
+      process.execPath,
+      [
+        bin,
+        "setup",
+        "--codex-home",
+        dir,
+        "--name",
+        "xiaomi",
+        "--type",
+        "official_subscription",
+        "--base-url",
+        "https://token-plan-sgp.xiaomimimo.com/v1",
+        "--anthropic-base-url",
+        "https://token-plan-sgp.xiaomimimo.com/anthropic",
+        "--codex-upstream-protocol",
+        "chat-completions",
+        "--claude-upstream-protocol",
+        "anthropic-messages",
+        "--model",
+        "mimo-v2.5-pro",
+      ],
+      { input: "tp-key\n", encoding: "utf8", env: spawnEnv },
+    );
+    assert.equal(setup.status, 0, setup.stderr);
+
+    const result = spawnSync(process.execPath, [bin, "list", "--codex-home", dir], {
+      encoding: "utf8",
+      env: spawnEnv,
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, / xiaomi/);
+    assert.match(result.stdout, /type: official_subscription/);
+    assert.match(result.stdout, /base_url: https:\/\/token-plan-sgp\.xiaomimimo\.com\/v1/);
+    assert.match(result.stdout, /anthropic_base_url: https:\/\/token-plan-sgp\.xiaomimimo\.com\/anthropic/);
+    assert.match(result.stdout, /codex_upstream_protocol: chat-completions/);
+    assert.match(result.stdout, /claude_upstream_protocol: anthropic-messages/);
+  });
+
+  it("rejects invalid profile protocol choices", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "api-switch-"));
+    const result = spawnSync(
+      process.execPath,
+      [
+        bin,
+        "setup",
+        "--codex-home",
+        dir,
+        "--name",
+        "bad",
+        "--base-url",
+        "https://api.example.com/v1",
+        "--model",
+        "gpt-5.5",
+        "--codex-upstream-protocol",
+        "not-real",
+      ],
+      { input: "sk-test\n", encoding: "utf8", env: spawnEnv },
+    );
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /Codex upstream protocol must be one of/);
   });
 
   it("keeps account provider metadata when using proxy mode", () => {
@@ -1310,6 +1394,42 @@ describe("api-switch", () => {
     assert.equal(lines[1].payload.model, "claude-opus-4-6");
     assert.equal(lines[1].payload.collaboration_mode.settings.model, "claude-opus-4-6");
     assert.equal(lines[2].payload.model, "claude-opus-4-6");
+  });
+
+  it("switches back to clean official account login by clearing proxy-only model settings", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "api-switch-"));
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, "auth.json"), `${JSON.stringify({ auth_mode: "chatgpt", tokens: { id: "account" } }, null, 2)}\n`);
+    fs.writeFileSync(
+      path.join(dir, "config.toml"),
+      [
+        'openai_base_url = "http://127.0.0.1:18600/v1"',
+        'forced_login_method = "api"',
+        'model = "gpt-5.5"',
+        'model_reasoning_effort = "medium"',
+        `model_catalog_json = "${path.join(dir, "api-switch", "vayne_models.json").replace(/\\/g, "\\\\")}"`,
+        'personality = "pragmatic"',
+        '',
+      ].join("\n"),
+    );
+    fs.mkdirSync(path.join(dir, "api-switch"), { recursive: true });
+    fs.writeFileSync(path.join(dir, "api-switch", "proxy-settings.json"), JSON.stringify({
+      enabled: true,
+      clients: { codex: { targetProfile: "vayne" }, "claude-code": { targetProfile: "" } },
+    }));
+
+    const result = spawnSync(process.execPath, [bin, "account", "--codex-home", dir], { encoding: "utf8", env: spawnEnv });
+
+    assert.equal(result.status, 0, result.stderr);
+    const config = fs.readFileSync(path.join(dir, "config.toml"), "utf8");
+    assert.doesNotMatch(config, /openai_base_url/);
+    assert.doesNotMatch(config, /forced_login_method/);
+    assert.doesNotMatch(config, /^model\s*=/m);
+    assert.doesNotMatch(config, /model_catalog_json/);
+    assert.doesNotMatch(config, /model_reasoning_effort/);
+    assert.match(config, /personality = "pragmatic"/);
+    const proxySettings = JSON.parse(fs.readFileSync(path.join(dir, "api-switch", "proxy-settings.json"), "utf8"));
+    assert.equal(proxySettings.clients.codex.targetProfile, "");
   });
 
   it("switches back to account login by clearing the profile key", () => {
@@ -1875,6 +1995,44 @@ describe("api-switch", () => {
     }
   });
 
+  it("web API saves official subscription profile fields", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "api-switch-"));
+    const server = spawn(process.execPath, [bin, "web", "--codex-home", dir, "--host", "127.0.0.1", "--port", "0", "--no-open"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+
+    try {
+      const webUrl = await waitForWebUrl(server);
+      const save = await fetch(`${webUrl}/api/setup`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          name: "xiaomi",
+          profileType: "official_subscription",
+          baseUrl: "https://token-plan-sgp.xiaomimimo.com/v1",
+          anthropicBaseUrl: "https://token-plan-sgp.xiaomimimo.com/anthropic",
+          codexUpstreamProtocol: "chat-completions",
+          claudeUpstreamProtocol: "anthropic-messages",
+          model: "mimo-v2.5-pro",
+          apiKey: "tp-key",
+        }),
+      });
+      assert.equal(save.status, 200, await save.text());
+      const profiles = await fetch(`${webUrl}/api/profiles`);
+      const payload = await profiles.json();
+      assert.equal(profiles.status, 200);
+      assert.equal(payload.profiles[0].name, "xiaomi");
+      assert.equal(payload.profiles[0].profileType, "official_subscription");
+      assert.equal(payload.profiles[0].baseUrl, "https://token-plan-sgp.xiaomimimo.com/v1");
+      assert.equal(payload.profiles[0].anthropicBaseUrl, "https://token-plan-sgp.xiaomimimo.com/anthropic");
+      assert.equal(payload.profiles[0].codexUpstreamProtocol, "chat-completions");
+      assert.equal(payload.profiles[0].claudeUpstreamProtocol, "anthropic-messages");
+    } finally {
+      server.kill();
+    }
+  });
+
   it("web UI exposes minimal route and health controls", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "api-switch-"));
     const upstream = http.createServer((req, res) => {
@@ -1887,7 +2045,7 @@ describe("api-switch", () => {
       res.end(JSON.stringify({ error: "not found" }));
     });
     await new Promise((resolve) => upstream.listen(0, "127.0.0.1", resolve));
-    const setup = spawnSync(process.execPath, [bin, "setup", "--codex-home", dir, "--name", "claude", "--base-url", `http://127.0.0.1:${upstream.address().port}/v1`, "--model", "claude-opus-4-6"], {
+    const setup = spawnSync(process.execPath, [bin, "setup", "--codex-home", dir, "--name", "claude", "--base-url", `http://127.0.0.1:${upstream.address().port}/v1`, "--model", "claude-opus-4-6", "--codex-upstream-protocol", "responses"], {
       input: "sk-claude\n",
       encoding: "utf8",
     });
@@ -1902,17 +2060,17 @@ describe("api-switch", () => {
       const page = await fetch(webUrl);
       const html = await page.text();
       assert.equal(page.status, 200);
-      assert.match(html, /Advanced: model name mapping/);
-      assert.match(html, /class="advanced-panel"/);
-      assert.match(html, /id="route-form"/);
-      assert.match(html, /id="routes-list"/);
-      assert.match(html, /id="health-list"/);
-      assert.match(html, /id="health-refresh"/);
       assert.match(html, /id="service-status-refresh"/);
       assert.match(html, /id="request-list"/);
-      assert.match(html, /data-action="capabilities"/);
+      assert.match(html, /data-action="clone"/);
       assert.match(html, /Use for Codex/);
       assert.match(html, /Use for Claude Code/);
+      assert.match(html, /id="profileType"/);
+      assert.match(html, /official_subscription/);
+      assert.match(html, /id="anthropicBaseUrl"/);
+      assert.match(html, /id="codexUpstreamProtocol"/);
+      assert.match(html, /id="claudeUpstreamProtocol"/);
+      assert.match(html, /anthropic-messages/);
       assert.match(html, /restartCodex: true/);
       assert.doesNotMatch(html, /fallbackProfiles/);
       assert.doesNotMatch(html, /id="diagnostics"/);
@@ -1972,6 +2130,11 @@ describe("api-switch", () => {
         res.end(JSON.stringify({ id: "chat_health", object: "chat.completion", model: "gpt-5.5", choices: [{ message: { role: "assistant", content: "ok" } }] }));
         return;
       }
+      if (req.method === "POST" && req.url === "/v1/responses") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ id: "resp_health", object: "response", model: "gpt-5.5", output: [] }));
+        return;
+      }
       res.writeHead(404, { "content-type": "application/json" });
       res.end(JSON.stringify({ error: "not found" }));
     });
@@ -2002,6 +2165,52 @@ describe("api-switch", () => {
     }
   });
 
+  it("tests the selected relay endpoint and does not fallback to another protocol", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "api-switch-"));
+    const hits = [];
+    const upstream = http.createServer((req, res) => {
+      hits.push(`${req.method} ${req.url}`);
+      if (req.method === "GET" && req.url === "/v1/models") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ data: [{ id: "gpt-5.5" }] }));
+        return;
+      }
+      if (req.method === "POST" && req.url === "/v1/responses") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ id: "resp_ok", object: "response", model: "gpt-5.5", output: [] }));
+        return;
+      }
+      res.writeHead(404, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "not found" }));
+    });
+    await new Promise((resolve) => upstream.listen(0, "127.0.0.1", resolve));
+    const setup = spawnSync(process.execPath, [bin, "setup", "--codex-home", dir, "--name", "testprof", "--base-url", `http://127.0.0.1:${upstream.address().port}/v1`, "--model", "gpt-5.5", "--codex-upstream-protocol", "responses"], {
+      input: "sk-test\n",
+      encoding: "utf8",
+    });
+    assert.equal(setup.status, 0, setup.stderr);
+    const server = spawn(process.execPath, [bin, "web", "--codex-home", dir, "--host", "127.0.0.1", "--port", "0", "--no-open"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    try {
+      const webUrl = await waitForWebUrl(server);
+      const response = await fetch(`${webUrl}/api/test`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: "testprof" }),
+      });
+      const payload = await response.json();
+      assert.equal(response.status, 200, JSON.stringify(payload));
+      assert.match(payload.output, /responses ok/);
+      assert.ok(hits.includes("POST /v1/responses"), "should test /v1/responses");
+      assert.ok(!hits.includes("POST /v1/chat/completions"), "should NOT test /v1/chat/completions");
+    } finally {
+      server.kill();
+      upstream.close();
+    }
+  });
+
   it("detects profile endpoint capabilities on demand", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "api-switch-"));
     const hits = [];
@@ -2020,6 +2229,11 @@ describe("api-switch", () => {
       if (req.method === "POST" && req.url === "/v1/chat/completions") {
         res.writeHead(200, { "content-type": "application/json" });
         res.end(JSON.stringify({ id: "chat_probe", object: "chat.completion", choices: [{ message: { role: "assistant", content: "ok" } }] }));
+        return;
+      }
+      if (req.method === "POST" && req.url === "/v1/completions") {
+        res.writeHead(404, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: "completions unavailable" }));
         return;
       }
       if (req.method === "POST" && req.url === "/v1/messages") {
@@ -2054,8 +2268,94 @@ describe("api-switch", () => {
       assert.equal(payload.probes.find((probe) => probe.name === "models").ok, true);
       assert.equal(payload.probes.find((probe) => probe.name === "responses").ok, true);
       assert.equal(payload.probes.find((probe) => probe.name === "chat_completions").ok, true);
+      assert.equal(payload.probes.find((probe) => probe.name === "completions").ok, false);
       assert.equal(payload.probes.find((probe) => probe.name === "messages").ok, false);
-      assert.deepEqual(hits.sort(), ["GET /v1/models", "POST /v1/chat/completions", "POST /v1/messages", "POST /v1/responses"].sort());
+      assert.equal(payload.recommended.codexUpstreamProtocol, "responses");
+      assert.equal(payload.recommended.claudeUpstreamProtocol, "chat-completions");
+      assert.deepEqual(hits.sort(), ["GET /v1/models", "POST /v1/chat/completions", "POST /v1/completions", "POST /v1/messages", "POST /v1/responses"].sort());
+    } finally {
+      server.kill();
+      upstream.close();
+    }
+  });
+
+  it("detects Anthropic messages capability through the separate Anthropic base URL", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "api-switch-"));
+    const hits = [];
+    const upstream = http.createServer(async (req, res) => {
+      hits.push(`${req.method} ${req.url}`);
+      if (req.method === "GET" && req.url === "/v1/models") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ data: [{ id: "mimo-v2.5-pro" }] }));
+        return;
+      }
+      if (req.method === "POST" && req.url === "/v1/responses") {
+        res.writeHead(404, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: "responses unavailable" }));
+        return;
+      }
+      if (req.method === "POST" && req.url === "/v1/chat/completions") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ id: "chat_probe", object: "chat.completion", choices: [{ message: { role: "assistant", content: "ok" } }] }));
+        return;
+      }
+      if (req.method === "POST" && req.url === "/v1/completions") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ id: "completion_probe", object: "text_completion", choices: [{ text: "ok" }] }));
+        return;
+      }
+      if (req.method === "POST" && req.url === "/anthropic/v1/messages") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ id: "msg_probe", type: "message", role: "assistant", content: [{ type: "text", text: "ok" }] }));
+        return;
+      }
+      res.writeHead(404, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "not found" }));
+    });
+    await new Promise((resolve) => upstream.listen(0, "127.0.0.1", resolve));
+    const openaiBaseUrl = `http://127.0.0.1:${upstream.address().port}/v1`;
+    const anthropicBaseUrl = `http://127.0.0.1:${upstream.address().port}/anthropic`;
+    const setup = spawnSync(process.execPath, [
+      bin,
+      "setup",
+      "--codex-home",
+      dir,
+      "--name",
+      "xiaomi",
+      "--type",
+      "official_subscription",
+      "--base-url",
+      openaiBaseUrl,
+      "--anthropic-base-url",
+      anthropicBaseUrl,
+      "--model",
+      "mimo-v2.5-pro",
+    ], {
+      input: "tp-key\n",
+      encoding: "utf8",
+    });
+    assert.equal(setup.status, 0, setup.stderr);
+    const server = spawn(process.execPath, [bin, "web", "--codex-home", dir, "--host", "127.0.0.1", "--port", "0", "--no-open"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+
+    try {
+      const webUrl = await waitForWebUrl(server);
+      const response = await fetch(`${webUrl}/api/profile/capabilities`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: "xiaomi" }),
+      });
+      const payload = await response.json();
+      const messagesProbe = payload.probes.find((probe) => probe.name === "messages");
+      assert.equal(response.status, 200);
+      assert.equal(messagesProbe.ok, true);
+      assert.equal(messagesProbe.url, `${anthropicBaseUrl}/v1/messages`);
+      assert.equal(payload.recommended.codexUpstreamProtocol, "chat-completions");
+      assert.equal(payload.recommended.claudeUpstreamProtocol, "anthropic-messages");
+      assert.ok(hits.includes("POST /anthropic/v1/messages"));
+      assert.ok(!hits.includes("POST /anthropic/messages"));
     } finally {
       server.kill();
       upstream.close();
@@ -2248,6 +2548,203 @@ describe("api-switch", () => {
       assert.equal(receivedHeaders.authorization, "Bearer sk-upstream");
       assert.equal(receivedHeaders["openai-organization"], "org_123");
       assert.equal(receivedHeaders["openai-project"], "proj_123");
+    } finally {
+      server.kill();
+      upstream.close();
+    }
+  });
+
+  it("uses chat completions bridge when a profile forces chat-completions upstream", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "api-switch-"));
+    let receivedPath = "";
+    let receivedBody = null;
+    const upstream = http.createServer(async (req, res) => {
+      if (req.method === "POST" && req.url === "/v1/chat/completions") {
+        receivedPath = req.url;
+        const chunks = [];
+        for await (const chunk of req) chunks.push(chunk);
+        receivedBody = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({
+          id: "chat_forced",
+          object: "chat.completion",
+          model: receivedBody.model,
+          choices: [{ message: { role: "assistant", content: "ok" }, finish_reason: "stop", index: 0 }],
+        }));
+        return;
+      }
+      if (req.method === "POST" && req.url === "/v1/responses") {
+        res.writeHead(404, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: "responses not supported" }));
+        return;
+      }
+      res.writeHead(404, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "not found" }));
+    });
+    await new Promise((resolve) => upstream.listen(0, "127.0.0.1", resolve));
+    const setup = spawnSync(process.execPath, [
+      bin,
+      "setup",
+      "--codex-home",
+      dir,
+      "--name",
+      "xiaomi",
+      "--type",
+      "official_subscription",
+      "--base-url",
+      `http://127.0.0.1:${upstream.address().port}/v1`,
+      "--model",
+      "mimo-v2.5-pro",
+    ], { input: "tp-key\n", encoding: "utf8" });
+    assert.equal(setup.status, 0, setup.stderr);
+    const storePath = path.join(dir, "api-switch", "profiles.json");
+    const store = JSON.parse(fs.readFileSync(storePath, "utf8"));
+    store.profiles.xiaomi.upstreamProtocol = "chat-completions";
+    fs.writeFileSync(storePath, JSON.stringify(store, null, 2));
+    const activate = spawnSync(process.execPath, [bin, "default", "--codex-home", dir, "--name", "xiaomi"], { encoding: "utf8", env: spawnEnv });
+    assert.equal(activate.status, 0, activate.stderr);
+    const server = spawn(process.execPath, [bin, "proxy", "--codex-home", dir, "--host", "127.0.0.1", "--port", "0"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+
+    try {
+      const baseUrl = await waitForProxyUrl(server);
+      const response = await fetch(`${baseUrl}/responses`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: "mimo-v2.5-pro", input: "Reply exactly: ok", max_output_tokens: 8, stream: false }),
+      });
+      const payload = await response.json();
+      assert.equal(response.status, 200, JSON.stringify(payload));
+      assert.equal(receivedPath, "/v1/chat/completions");
+      assert.equal(receivedBody.model, "mimo-v2.5-pro");
+      assert.equal(payload.output[0].content[0].text, "ok");
+      assert.equal(response.headers.get("x-api-switch-upstream-protocol"), "chat-completions-bridge");
+    } finally {
+      server.kill();
+      upstream.close();
+    }
+  });
+
+  it("does not fall back to responses when a profile explicitly forces chat-completions upstream", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "api-switch-"));
+    let chatHits = 0;
+    let responsesHits = 0;
+    const upstream = http.createServer(async (req, res) => {
+      if (req.method === "POST" && req.url === "/v1/chat/completions") {
+        chatHits += 1;
+        res.writeHead(404, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: { message: "chat not found" } }));
+        return;
+      }
+      if (req.method === "POST" && req.url === "/v1/responses") {
+        responsesHits += 1;
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ id: "unexpected", object: "response", output: [] }));
+        return;
+      }
+      res.writeHead(404, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "not found" }));
+    });
+    await new Promise((resolve) => upstream.listen(0, "127.0.0.1", resolve));
+    const setup = spawnSync(process.execPath, [
+      bin,
+      "setup",
+      "--codex-home",
+      dir,
+      "--name",
+      "xiaomi",
+      "--base-url",
+      `http://127.0.0.1:${upstream.address().port}/v1`,
+      "--model",
+      "mimo-v2.5-pro",
+      "--codex-upstream-protocol",
+      "chat-completions",
+    ], { input: "tp-key\n", encoding: "utf8" });
+    assert.equal(setup.status, 0, setup.stderr);
+    const activate = spawnSync(process.execPath, [bin, "default", "--codex-home", dir, "--name", "xiaomi"], { encoding: "utf8", env: spawnEnv });
+    assert.equal(activate.status, 0, activate.stderr);
+    const server = spawn(process.execPath, [bin, "proxy", "--codex-home", dir, "--host", "127.0.0.1", "--port", "0"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+
+    try {
+      const baseUrl = await waitForProxyUrl(server);
+      const response = await fetch(`${baseUrl}/responses`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: "mimo-v2.5-pro", input: "hello", max_output_tokens: 8, stream: false }),
+      });
+      const payload = await response.json();
+      assert.equal(response.status, 404, JSON.stringify(payload));
+      assert.equal(chatHits, 1);
+      assert.equal(responsesHits, 0);
+    } finally {
+      server.kill();
+      upstream.close();
+    }
+  });
+
+  it("uses legacy completions bridge when a profile forces completions upstream", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "api-switch-"));
+    let receivedPath = "";
+    let receivedBody = null;
+    const upstream = http.createServer(async (req, res) => {
+      if (req.method === "POST" && req.url === "/v1/completions") {
+        receivedPath = req.url;
+        const chunks = [];
+        for await (const chunk of req) chunks.push(chunk);
+        receivedBody = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({
+          id: "cmpl_forced",
+          object: "text_completion",
+          model: receivedBody.model,
+          choices: [{ text: "ok", finish_reason: "stop", index: 0 }],
+        }));
+        return;
+      }
+      res.writeHead(404, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "not found" }));
+    });
+    await new Promise((resolve) => upstream.listen(0, "127.0.0.1", resolve));
+    const setup = spawnSync(process.execPath, [
+      bin,
+      "setup",
+      "--codex-home",
+      dir,
+      "--name",
+      "legacy",
+      "--base-url",
+      `http://127.0.0.1:${upstream.address().port}/v1`,
+      "--model",
+      "text-davinci-003",
+    ], { input: "sk-key\n", encoding: "utf8" });
+    assert.equal(setup.status, 0, setup.stderr);
+    const storePath = path.join(dir, "api-switch", "profiles.json");
+    const store = JSON.parse(fs.readFileSync(storePath, "utf8"));
+    store.profiles.legacy.codexUpstreamProtocol = "completions";
+    fs.writeFileSync(storePath, JSON.stringify(store, null, 2));
+    const activate = spawnSync(process.execPath, [bin, "default", "--codex-home", dir, "--name", "legacy"], { encoding: "utf8", env: spawnEnv });
+    assert.equal(activate.status, 0, activate.stderr);
+    const server = spawn(process.execPath, [bin, "proxy", "--codex-home", dir, "--host", "127.0.0.1", "--port", "0"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+
+    try {
+      const baseUrl = await waitForProxyUrl(server);
+      const response = await fetch(`${baseUrl}/responses`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: "text-davinci-003", input: "Reply exactly: ok", max_output_tokens: 8, stream: false }),
+      });
+      const payload = await response.json();
+      assert.equal(response.status, 200, JSON.stringify(payload));
+      assert.equal(receivedPath, "/v1/completions");
+      assert.equal(receivedBody.model, "text-davinci-003");
+      assert.match(receivedBody.prompt, /Reply exactly: ok/);
+      assert.equal(payload.output[0].content[0].text, "ok");
+      assert.equal(response.headers.get("x-api-switch-upstream-protocol"), "completions-bridge");
     } finally {
       server.kill();
       upstream.close();
@@ -2590,6 +3087,74 @@ describe("api-switch", () => {
     }
   });
 
+  it("passes Claude Codex requests through Responses when the profile forces responses upstream", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "api-switch-"));
+    let responsesHits = 0;
+    let chatHits = 0;
+    const upstream = http.createServer(async (req, res) => {
+      if (req.method === "POST" && req.url === "/v1/responses") {
+        responsesHits += 1;
+        const chunks = [];
+        for await (const chunk of req) chunks.push(chunk);
+        const payload = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({
+          id: "resp_claude",
+          object: "response",
+          model: payload.model,
+          output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: "ok" }] }],
+        }));
+        return;
+      }
+      if (req.method === "POST" && req.url === "/v1/chat/completions") {
+        chatHits += 1;
+        res.writeHead(500, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: "chat bridge should not be used" }));
+        return;
+      }
+      res.writeHead(404, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "not found" }));
+    });
+    await new Promise((resolve) => upstream.listen(0, "127.0.0.1", resolve));
+    const setup = spawnSync(process.execPath, [
+      bin,
+      "setup",
+      "--codex-home",
+      dir,
+      "--name",
+      "claude",
+      "--base-url",
+      `http://127.0.0.1:${upstream.address().port}/v1`,
+      "--model",
+      "claude-opus-4-6",
+      "--codex-upstream-protocol",
+      "responses",
+    ], { input: "sk-test\n", encoding: "utf8" });
+    assert.equal(setup.status, 0, setup.stderr);
+    const activate = spawnSync(process.execPath, [bin, "default", "--codex-home", dir, "--name", "claude"], { encoding: "utf8", env: spawnEnv });
+    assert.equal(activate.status, 0, activate.stderr);
+    const server = spawn(process.execPath, [bin, "proxy", "--codex-home", dir, "--host", "127.0.0.1", "--port", "0"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    try {
+      const baseUrl = await waitForProxyUrl(server);
+      const response = await fetch(`${baseUrl}/responses`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: "claude-opus-4-6", input: "hello", stream: false }),
+      });
+      const payload = await response.json();
+      assert.equal(response.status, 200);
+      assert.equal(payload.output[0].content[0].text, "ok");
+      assert.equal(responsesHits, 1);
+      assert.equal(chatHits, 0);
+    } finally {
+      server.kill();
+      upstream.close();
+    }
+  });
+
   it("turns upstream streaming errors into Codex response.failed events", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "api-switch-"));
     const upstream = http.createServer((req, res) => {
@@ -2848,7 +3413,7 @@ describe("api-switch", () => {
       input: "sk-gpt\n",
       encoding: "utf8",
     });
-    const setupClaude = spawnSync(process.execPath, [bin, "setup", "--codex-home", dir, "--name", "claude", "--base-url", `http://127.0.0.1:${upstream.address().port}/v1`, "--model", "claude-opus-4-6"], {
+    const setupClaude = spawnSync(process.execPath, [bin, "setup", "--codex-home", dir, "--name", "claude", "--base-url", `http://127.0.0.1:${upstream.address().port}/v1`, "--model", "claude-opus-4-6", "--codex-upstream-protocol", "responses"], {
       input: "sk-claude\n",
       encoding: "utf8",
     });
@@ -3090,6 +3655,311 @@ describe("api-switch", () => {
       assert.equal(receivedHeaders["x-api-key"], undefined);
       assert.equal(receivedHeaders["anthropic-beta"], undefined);
       assert.equal(response.headers.get("x-api-switch-client"), "claude-code");
+    } finally {
+      server.kill();
+      upstream.close();
+    }
+  });
+
+  it("uses a profile-specific Anthropic base URL for official subscription Claude Code traffic", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "api-switch-"));
+    let receivedPath = "";
+    let receivedHeaders = {};
+    const upstream = http.createServer(async (req, res) => {
+      if (req.method === "POST" && req.url === "/anthropic/v1/messages") {
+        receivedPath = req.url;
+        receivedHeaders = req.headers;
+        const chunks = [];
+        for await (const chunk of req) chunks.push(chunk);
+        const payload = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+        assert.equal(payload.messages[0].content, "hello official");
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({
+          id: "msg_official",
+          type: "message",
+          role: "assistant",
+          model: payload.model,
+          content: [{ type: "text", text: "official ok" }],
+          stop_reason: "end_turn",
+          usage: { input_tokens: 1, output_tokens: 1 },
+        }));
+        return;
+      }
+      res.writeHead(404, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: `unexpected ${req.method} ${req.url}` }));
+    });
+    await new Promise((resolve) => upstream.listen(0, "127.0.0.1", resolve));
+    const openaiBaseUrl = `http://127.0.0.1:${upstream.address().port}/v1`;
+    const anthropicBaseUrl = `http://127.0.0.1:${upstream.address().port}/anthropic`;
+    const setup = spawnSync(process.execPath, [
+      bin,
+      "setup",
+      "--codex-home",
+      dir,
+      "--name",
+      "xiaomi",
+      "--type",
+      "official_subscription",
+      "--base-url",
+      openaiBaseUrl,
+      "--anthropic-base-url",
+      anthropicBaseUrl,
+      "--claude-upstream-protocol",
+      "anthropic-messages",
+      "--model",
+      "claude-opus-4-6",
+    ], {
+      input: "tp-key\n",
+      encoding: "utf8",
+    });
+    assert.equal(setup.status, 0, setup.stderr);
+    const store = JSON.parse(fs.readFileSync(path.join(dir, "api-switch", "profiles.json"), "utf8"));
+    assert.equal(store.profiles.xiaomi.profileType, "official_subscription");
+    assert.equal(store.profiles.xiaomi.baseUrl, openaiBaseUrl);
+    assert.equal(store.profiles.xiaomi.anthropicBaseUrl, anthropicBaseUrl);
+
+    const claudeDir = fs.mkdtempSync(path.join(os.tmpdir(), "claude-home-"));
+    const activate = spawnSync(process.execPath, [bin, "claude-proxy", "--codex-home", dir, "--claude-home", claudeDir, "--name", "xiaomi"], { encoding: "utf8", env: spawnEnv });
+    assert.equal(activate.status, 0, activate.stderr);
+    const server = spawn(process.execPath, [bin, "proxy", "--codex-home", dir, "--host", "127.0.0.1", "--port", "0"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    try {
+      const baseUrl = await waitForProxyUrl(server);
+      const rootUrl = baseUrl.replace(/\/v1$/, "");
+      const response = await fetch(`${rootUrl}/v1/messages`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "anthropic-version": "2023-06-01",
+          authorization: "Bearer client-key",
+        },
+        body: JSON.stringify({ model: "claude-opus-4-6", max_tokens: 16, messages: [{ role: "user", content: "hello official" }] }),
+      });
+      const payload = await response.json();
+      assert.equal(response.status, 200, JSON.stringify(payload));
+      assert.equal(payload.content[0].text, "official ok");
+      assert.equal(receivedPath, "/anthropic/v1/messages");
+      assert.equal(receivedHeaders.authorization, "Bearer tp-key");
+      assert.equal(receivedHeaders["x-api-key"], "tp-key");
+    } finally {
+      server.kill();
+      upstream.close();
+    }
+  });
+
+  it("strictly uses Anthropic messages for Claude Code when explicitly selected", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "api-switch-"));
+    let messageHits = 0;
+    let chatHits = 0;
+    let receivedBody = null;
+    const upstream = http.createServer(async (req, res) => {
+      if (req.method === "POST" && req.url === "/anthropic/v1/messages") {
+        messageHits += 1;
+        const chunks = [];
+        for await (const chunk of req) chunks.push(chunk);
+        receivedBody = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+        res.writeHead(200, { "content-type": "text/event-stream; charset=utf-8" });
+        res.end('event: message_start\ndata: {"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","content":[],"model":"claude-opus-4-6-fast","stop_reason":null,"usage":{"input_tokens":1,"output_tokens":0}}}\n\nevent: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"anthropic ok"}}\n\nevent: message_stop\ndata: {"type":"message_stop"}\n\n');
+        return;
+      }
+      if (req.method === "POST" && req.url === "/v1/chat/completions") {
+        chatHits += 1;
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ id: "unexpected", choices: [{ message: { role: "assistant", content: "wrong" } }] }));
+        return;
+      }
+      res.writeHead(404, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: `unexpected ${req.method} ${req.url}` }));
+    });
+    await new Promise((resolve) => upstream.listen(0, "127.0.0.1", resolve));
+    const setup = spawnSync(process.execPath, [
+      bin,
+      "setup",
+      "--codex-home",
+      dir,
+      "--name",
+      "anthropic",
+      "--base-url",
+      `http://127.0.0.1:${upstream.address().port}/v1`,
+      "--anthropic-base-url",
+      `http://127.0.0.1:${upstream.address().port}/anthropic`,
+      "--claude-upstream-protocol",
+      "anthropic-messages",
+      "--model",
+      "claude-opus-4-6-fast",
+    ], { input: "sk-anthropic\n", encoding: "utf8" });
+    assert.equal(setup.status, 0, setup.stderr);
+    const claudeDir = fs.mkdtempSync(path.join(os.tmpdir(), "claude-home-"));
+    const activate = spawnSync(process.execPath, [bin, "claude-proxy", "--codex-home", dir, "--claude-home", claudeDir, "--name", "anthropic"], { encoding: "utf8", env: spawnEnv });
+    assert.equal(activate.status, 0, activate.stderr);
+    const server = spawn(process.execPath, [bin, "proxy", "--codex-home", dir, "--host", "127.0.0.1", "--port", "0"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    try {
+      const baseUrl = await waitForProxyUrl(server);
+      const rootUrl = baseUrl.replace(/\/v1$/, "");
+      const response = await fetch(`${rootUrl}/v1/messages`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "anthropic-version": "2023-06-01" },
+        body: JSON.stringify({
+          model: "stale-client-model",
+          max_tokens: 16,
+          stream: true,
+          messages: [{ role: "user", content: "hello anthropic" }],
+        }),
+      });
+      const text = await response.text();
+      assert.equal(response.status, 200, text);
+      assert.match(response.headers.get("content-type"), /text\/event-stream/);
+      assert.match(text, /anthropic ok/);
+      assert.equal(messageHits, 1);
+      assert.equal(chatHits, 0);
+      assert.equal(receivedBody.model, "claude-opus-4-6-fast");
+      assert.equal(receivedBody.stream, true);
+    } finally {
+      server.kill();
+      upstream.close();
+    }
+  });
+
+  it("uses OpenAI-compatible chat completions for Claude Code when explicitly selected", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "api-switch-"));
+    let receivedPath = "";
+    let receivedHeaders = {};
+    const upstream = http.createServer(async (req, res) => {
+      if (req.method === "POST" && req.url === "/v1/chat/completions") {
+        receivedPath = req.url;
+        receivedHeaders = req.headers;
+        const chunks = [];
+        for await (const chunk of req) chunks.push(chunk);
+        const payload = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+        assert.equal(payload.messages[0].content, "hello openai compatible");
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({
+          id: "chat_official",
+          object: "chat.completion",
+          model: payload.model,
+          choices: [{ message: { role: "assistant", content: "chat ok" } }],
+          usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+        }));
+        return;
+      }
+      res.writeHead(404, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: `unexpected ${req.method} ${req.url}` }));
+    });
+    await new Promise((resolve) => upstream.listen(0, "127.0.0.1", resolve));
+    const openaiBaseUrl = `http://127.0.0.1:${upstream.address().port}/v1`;
+    const anthropicBaseUrl = `http://127.0.0.1:${upstream.address().port}/anthropic`;
+    const setup = spawnSync(process.execPath, [
+      bin,
+      "setup",
+      "--codex-home",
+      dir,
+      "--name",
+      "xiaomi",
+      "--type",
+      "official_subscription",
+      "--base-url",
+      openaiBaseUrl,
+      "--anthropic-base-url",
+      anthropicBaseUrl,
+      "--claude-upstream-protocol",
+      "chat-completions",
+      "--model",
+      "mimo-v2.5-pro",
+    ], {
+      input: "tp-key\n",
+      encoding: "utf8",
+    });
+    assert.equal(setup.status, 0, setup.stderr);
+    const claudeDir = fs.mkdtempSync(path.join(os.tmpdir(), "claude-home-"));
+    const activate = spawnSync(process.execPath, [bin, "claude-proxy", "--codex-home", dir, "--claude-home", claudeDir, "--name", "xiaomi"], { encoding: "utf8", env: spawnEnv });
+    assert.equal(activate.status, 0, activate.stderr);
+    const server = spawn(process.execPath, [bin, "proxy", "--codex-home", dir, "--host", "127.0.0.1", "--port", "0"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    try {
+      const baseUrl = await waitForProxyUrl(server);
+      const rootUrl = baseUrl.replace(/\/v1$/, "");
+      const response = await fetch(`${rootUrl}/v1/messages`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "anthropic-version": "2023-06-01",
+          authorization: "Bearer client-key",
+        },
+        body: JSON.stringify({ model: "mimo-v2.5-pro", max_tokens: 16, messages: [{ role: "user", content: "hello openai compatible" }] }),
+      });
+      const payload = await response.json();
+      assert.equal(response.status, 200, JSON.stringify(payload));
+      assert.equal(payload.content[0].text, "chat ok");
+      assert.equal(receivedPath, "/v1/chat/completions");
+      assert.equal(receivedHeaders.authorization, "Bearer tp-key");
+    } finally {
+      server.kill();
+      upstream.close();
+    }
+  });
+
+  it("does not fall back to Anthropic messages when Claude Code explicitly selects chat completions", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "api-switch-"));
+    let chatHits = 0;
+    let messageHits = 0;
+    const upstream = http.createServer(async (req, res) => {
+      if (req.method === "POST" && req.url === "/v1/chat/completions") {
+        chatHits += 1;
+        res.writeHead(404, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: { message: "chat missing" } }));
+        return;
+      }
+      if (req.method === "POST" && req.url === "/v1/messages") {
+        messageHits += 1;
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ type: "message", content: [{ type: "text", text: "unexpected" }] }));
+        return;
+      }
+      res.writeHead(404, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "not found" }));
+    });
+    await new Promise((resolve) => upstream.listen(0, "127.0.0.1", resolve));
+    const setup = spawnSync(process.execPath, [
+      bin,
+      "setup",
+      "--codex-home",
+      dir,
+      "--name",
+      "relay",
+      "--base-url",
+      `http://127.0.0.1:${upstream.address().port}/v1`,
+      "--claude-upstream-protocol",
+      "chat-completions",
+      "--model",
+      "mimo-v2.5-pro",
+    ], { input: "sk-key\n", encoding: "utf8" });
+    assert.equal(setup.status, 0, setup.stderr);
+    const claudeDir = fs.mkdtempSync(path.join(os.tmpdir(), "claude-home-"));
+    const activate = spawnSync(process.execPath, [bin, "claude-proxy", "--codex-home", dir, "--claude-home", claudeDir, "--name", "relay"], { encoding: "utf8", env: spawnEnv });
+    assert.equal(activate.status, 0, activate.stderr);
+    const server = spawn(process.execPath, [bin, "proxy", "--codex-home", dir, "--host", "127.0.0.1", "--port", "0"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    try {
+      const baseUrl = await waitForProxyUrl(server);
+      const rootUrl = baseUrl.replace(/\/v1$/, "");
+      const response = await fetch(`${rootUrl}/v1/messages`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "anthropic-version": "2023-06-01" },
+        body: JSON.stringify({ model: "mimo-v2.5-pro", max_tokens: 16, messages: [{ role: "user", content: "hello" }] }),
+      });
+      const payload = await response.json();
+      assert.equal(response.status, 404, JSON.stringify(payload));
+      assert.equal(chatHits, 1);
+      assert.equal(messageHits, 0);
     } finally {
       server.kill();
       upstream.close();

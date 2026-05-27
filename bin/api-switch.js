@@ -27,6 +27,7 @@ Configure Codex Desktop and Claude Code to use a local proxy backed by relay pro
 Usage:
   api-switch setup --name <profile> --base-url <url> --model <model>
   api-switch setup --name vayne --base-url https://api.example.com/v1 --model gpt-5.5
+  api-switch setup --name xiaomi --type official_subscription --base-url https://token-plan-sgp.xiaomimimo.com/v1 --anthropic-base-url https://token-plan-sgp.xiaomimimo.com/anthropic --model mimo-v2.5-pro
   api-switch model --name <profile> --model <model>
   api-switch thread-model --model <model> [--provider <provider>] [--thread <id>]
   api-switch route --client <client> --model <model> --profile <profile> [--upstream-model <model>]
@@ -53,6 +54,11 @@ Options:
   --state-db <path>        Defaults to ~/.codex/state_5.sqlite
   --thread <id>            Thread id for thread-model; defaults to latest thread
   --provider <provider>    Provider for thread-model; defaults to openai
+  --type <type>            Profile type: relay or official_subscription
+  --profile-type <type>    Alias for --type
+  --anthropic-base-url <url> Optional Anthropic-compatible base URL for Claude Code
+  --codex-upstream-protocol <protocol> responses, chat-completions, or completions
+  --claude-upstream-protocol <protocol> anthropic-messages or chat-completions
   --client <client>        Client id for routes, default codex
   --upstream-model <model> Model sent to the upstream relay for a mapped route
   --delete-key             Delete the local key file when removing a profile
@@ -119,6 +125,19 @@ function validateClientId(client) {
   if (!/^[A-Za-z0-9_-]+$/.test(client || "")) {
     throw new Error("Client id may only contain letters, numbers, underscores, and hyphens.");
   }
+}
+
+function validateChoice(label, value, allowed) {
+  if (!value) return;
+  if (!allowed.includes(value)) {
+    throw new Error(`${label} must be one of: ${allowed.join(", ")}.`);
+  }
+}
+
+function validateProfileOptions(args) {
+  validateChoice("Profile type", args.profileType || args.type || "relay", ["relay", "official_subscription"]);
+  validateChoice("Codex upstream protocol", args.codexUpstreamProtocol || args.upstreamProtocol || "", ["responses", "chat-completions", "completions"]);
+  validateChoice("Claude upstream protocol", args.claudeUpstreamProtocol || "", ["anthropic-messages", "chat-completions"]);
 }
 
 function tomlString(value) {
@@ -322,8 +341,13 @@ function storedProfileFromRecord(name, record) {
   if (!record || typeof record !== "object") return null;
   return {
     name,
+    profileType: String(record.profileType || record.type || "relay"),
+    codexUpstreamProtocol: String(record.codexUpstreamProtocol || record.upstreamProtocol || ""),
+    claudeUpstreamProtocol: String(record.claudeUpstreamProtocol || ""),
+    upstreamProtocol: String(record.upstreamProtocol || ""),
     model: String(record.model || ""),
     baseUrl: String(record.baseUrl || ""),
+    anthropicBaseUrl: String(record.anthropicBaseUrl || ""),
     keyEnv: record.keyEnv ? String(record.keyEnv) : "",
     keyFile: record.keyFile ? String(record.keyFile) : "",
     catalogFile: record.catalogFile ? String(record.catalogFile) : "",
@@ -351,6 +375,11 @@ function ensureStoredProfile(codexHome, profile) {
   profiles[profile.name] = {
     name: profile.name,
     baseUrl: profile.baseUrl,
+    anthropicBaseUrl: profile.anthropicBaseUrl || "",
+    profileType: profile.profileType || "relay",
+    codexUpstreamProtocol: profile.codexUpstreamProtocol || profile.upstreamProtocol || "",
+    claudeUpstreamProtocol: profile.claudeUpstreamProtocol || "",
+    upstreamProtocol: profile.upstreamProtocol || "",
     model: profile.model,
     keyFile: profile.keyEnv ? "" : profile.keyFile,
     keyEnv: profile.keyEnv || "",
@@ -365,6 +394,7 @@ function ensureStoredProfile(codexHome, profile) {
 
 function writeProfile(args, secret) {
   validateName(args.name);
+  validateProfileOptions(args);
   if (!args.baseUrl) throw new Error("--base-url is required.");
   if (!args.model) throw new Error("--model is required.");
 
@@ -388,12 +418,17 @@ function writeProfile(args, secret) {
   const profiles = readProfilesStore(codexHome);
   profiles[args.name] = {
     name: args.name,
+    profileType: args.profileType || args.type || "relay",
+    codexUpstreamProtocol: args.codexUpstreamProtocol || args.upstreamProtocol || "",
+    claudeUpstreamProtocol: args.claudeUpstreamProtocol || "",
+    upstreamProtocol: args.upstreamProtocol || "",
     baseUrl: args.baseUrl,
+    anthropicBaseUrl: args.anthropicBaseUrl || "",
     model: args.model,
     keyFile: args.keyEnv ? "" : keyFile,
     keyEnv: args.keyEnv || "",
     reasoningEffort: args.reasoningEffort || "medium",
-    fallbackProfiles: args.fallbackProfiles ? String(args.fallbackProfiles).split(",").map((name) => name.trim()).filter(Boolean) : [],
+    fallbackProfiles: Array.isArray(args.fallbackProfiles) ? args.fallbackProfiles.filter(Boolean).map(String) : (args.fallbackProfiles ? String(args.fallbackProfiles).split(",").map((name) => name.trim()).filter(Boolean) : []),
     catalogFile,
     updatedAt: new Date().toISOString(),
   };
@@ -413,7 +448,7 @@ async function setup(args) {
   }
 
   writeProfile(args, secret);
-  console.log(`Saved relay profile: ${args.name}`);
+  console.log(`Saved profile: ${args.name}`);
   console.log("Run: api-switch web, then choose a client for this profile.");
 }
 
@@ -428,7 +463,7 @@ function remove(args) {
     const config = fs.readFileSync(configPath, "utf8");
     fs.writeFileSync(configPath, removeManagedBlock(config, args.name), { mode: 0o600 });
   }
-  console.log(`Removed relay profile: ${args.name}`);
+  console.log(`Removed profile: ${args.name}`);
 
   if (args.deleteKey && fs.existsSync(keyFile)) {
     fs.unlinkSync(keyFile);
@@ -816,7 +851,12 @@ function listCommand(args) {
     console.log("");
     console.log(`${profile.isDefault ? "*" : " "} ${profile.name}`);
     console.log(`  model: ${profile.model || "(none)"}`);
+    console.log(`  type: ${profile.profileType || "relay"}`);
     console.log(`  base_url: ${profile.baseUrl || "(none)"}`);
+    if (profile.anthropicBaseUrl) console.log(`  anthropic_base_url: ${profile.anthropicBaseUrl}`);
+    const codexProtocol = profile.codexUpstreamProtocol || profile.upstreamProtocol || "";
+    if (codexProtocol) console.log(`  codex_upstream_protocol: ${codexProtocol}`);
+    if (profile.claudeUpstreamProtocol) console.log(`  claude_upstream_protocol: ${profile.claudeUpstreamProtocol}`);
     console.log(`  run: ${profile.command}`);
   }
 }
@@ -834,7 +874,12 @@ function modelCommand(args) {
   writeProfile({
     codexHome,
     name: profile.name,
+    profileType: profile.profileType || "relay",
+    codexUpstreamProtocol: profile.codexUpstreamProtocol || profile.upstreamProtocol || "",
+    claudeUpstreamProtocol: profile.claudeUpstreamProtocol || "",
+    upstreamProtocol: profile.upstreamProtocol || "",
     baseUrl: profile.baseUrl,
+    anthropicBaseUrl: profile.anthropicBaseUrl || "",
     model: args.model,
     keyFile: profile.keyFile,
     keyEnv: profile.keyEnv,
@@ -1430,10 +1475,16 @@ function switchCodexToProxyMode(codexHome, profile, proxyBaseUrl, options = {}) 
 function switchCodexToAccountMode(codexHome, options = {}) {
   const snapshot = snapshotCodexSwitchFiles(codexHome);
   try {
+    const wasProxyMode = Boolean(currentOpenaiBaseUrl(codexHome));
     cleanupLegacyManagedBlocks(codexHome);
     clearDefaultProfile(codexHome);
     removeTopLevelConfigValue(codexHome, "openai_base_url");
     removeTopLevelConfigValue(codexHome, "forced_login_method");
+    removeTopLevelConfigValue(codexHome, "model_catalog_json");
+    removeTopLevelConfigValue(codexHome, "model_reasoning_effort");
+    if (wasProxyMode) {
+      removeTopLevelConfigValue(codexHome, "model");
+    }
     restoreAccountAuth(codexHome);
     const proxyState = readProxySettings(codexHome);
     proxyState.clients.codex.targetProfile = "";
@@ -1503,8 +1554,13 @@ function managedProfilePattern() {
 function profileFromManagedBlock(name, block) {
   return {
     name,
+    profileType: "relay",
+    codexUpstreamProtocol: "",
+    claudeUpstreamProtocol: "",
+    upstreamProtocol: "",
     model: tomlValue(block, "model"),
     baseUrl: tomlValue(block, "base_url"),
+    anthropicBaseUrl: "",
     keyEnv: tomlValue(block, "env_key"),
     keyFile: tomlArrayFirst(block, "auth.args"),
     catalogFile: tomlValue(block, "model_catalog_json"),
@@ -1565,7 +1621,7 @@ function switchTargets(codexHome) {
     profiles: listProfiles(codexHome).map((profile) => ({
       ...profile,
       isDefault: isProxyMode ? profile.name === codexTarget : profile.isDefault,
-      type: "relay",
+      type: profile.profileType || "relay",
       label: profile.name,
       command: isProxyMode && profile.name === codexTarget ? "Codex via local proxy" : "Use for Codex",
     })),
@@ -1602,10 +1658,22 @@ function chatCompletionsUrl(baseUrl) {
   return url.toString();
 }
 
+function completionsUrl(baseUrl) {
+  const url = new URL(baseUrl);
+  let pathname = url.pathname.replace(/\/+$/, "");
+  if (!pathname.endsWith("/completions")) pathname = `${pathname}/completions`;
+  url.pathname = pathname;
+  url.search = "";
+  url.hash = "";
+  return url.toString();
+}
+
 function messagesUrl(baseUrl) {
   const url = new URL(baseUrl);
   let pathname = url.pathname.replace(/\/+$/, "");
-  if (!pathname.endsWith("/messages")) pathname = `${pathname}/messages`;
+  if (!pathname.endsWith("/messages")) {
+    pathname = `${pathname}${pathname.endsWith("/v1") ? "" : "/v1"}/messages`;
+  }
   url.pathname = pathname;
   url.search = "";
   url.hash = "";
@@ -1704,9 +1772,9 @@ function resolveModelRoute(codexHome, client, requestedModel, activeProfile) {
   const model = String(requestedModel || "").trim();
   if (!model) return { profile: activeProfile, upstreamModel: activeProfile.model, mapped: false };
   const exact = routes[routeKey(client, model)] || routes[routeKey("*", model)];
-  if (!exact) return { profile: activeProfile, upstreamModel: model || activeProfile.model, mapped: false };
+  if (!exact) return { profile: activeProfile, upstreamModel: activeProfile.model, mapped: false };
   const profile = getManagedProfile(codexHome, exact.profile);
-  if (!profile) return { profile: activeProfile, upstreamModel: model || activeProfile.model, mapped: false };
+  if (!profile) return { profile: activeProfile, upstreamModel: activeProfile.model, mapped: false };
   return {
     profile,
     upstreamModel: exact.upstreamModel || profile.model || model,
@@ -1864,6 +1932,7 @@ async function probeJsonEndpoint(name, url, init) {
     const text = await response.text();
     return {
       name,
+      url,
       ok: response.ok,
       status: response.status,
       durationMs: Date.now() - startedAt,
@@ -1872,12 +1941,22 @@ async function probeJsonEndpoint(name, url, init) {
   } catch (error) {
     return {
       name,
+      url,
       ok: false,
       status: 0,
       durationMs: Date.now() - startedAt,
       error: error.message,
     };
   }
+}
+
+function recommendedProtocols(probes) {
+  const byName = new Map((Array.isArray(probes) ? probes : []).map((probe) => [probe.name, probe]));
+  const ok = (name) => Boolean(byName.get(name) && byName.get(name).ok);
+  return {
+    codexUpstreamProtocol: ok("responses") ? "responses" : ok("chat_completions") ? "chat-completions" : ok("completions") ? "completions" : "",
+    claudeUpstreamProtocol: ok("messages") ? "anthropic-messages" : ok("chat_completions") ? "chat-completions" : "",
+  };
 }
 
 async function detectProfileCapabilities(profile) {
@@ -1904,7 +1983,12 @@ async function detectProfileCapabilities(profile) {
       headers,
       body: JSON.stringify({ model, messages: [{ role: "user", content: "ok" }], max_tokens: 1, stream: false }),
     }),
-    probeJsonEndpoint("messages", messagesUrl(profile.baseUrl), {
+    probeJsonEndpoint("completions", completionsUrl(profile.baseUrl), {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ model, prompt: "ok", max_tokens: 1, stream: false }),
+    }),
+    probeJsonEndpoint("messages", messagesUrl(profile.anthropicBaseUrl || profile.baseUrl), {
       method: "POST",
       headers: {
         ...headers,
@@ -1918,6 +2002,7 @@ async function detectProfileCapabilities(profile) {
     model,
     baseUrl: profile.baseUrl,
     probes,
+    recommended: recommendedProtocols(probes),
     capabilities: modelCapabilities(model),
   };
 }
@@ -2009,13 +2094,19 @@ function htmlPage() {
       align-items: flex-end;
       justify-content: space-between;
       gap: 16px;
-      margin-bottom: 20px;
+      margin-bottom: 24px;
+      padding-bottom: 20px;
+      border-bottom: 1px solid var(--line);
     }
     h1 {
       margin: 0;
-      font-size: 28px;
-      line-height: 1.1;
-      letter-spacing: 0;
+      font-size: 26px;
+      line-height: 1.15;
+      letter-spacing: -0.01em;
+      background: linear-gradient(135deg, var(--accent), #0ea5e9);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
     }
     .subtitle {
       margin: 8px 0 0;
@@ -2032,9 +2123,10 @@ function htmlPage() {
     .language-toggle {
       display: inline-flex;
       border: 1px solid var(--line);
-      border-radius: 7px;
+      border-radius: 8px;
       background: var(--panel);
       overflow: hidden;
+      box-shadow: var(--shadow);
     }
     .language-toggle button {
       min-height: 38px;
@@ -2064,8 +2156,9 @@ function htmlPage() {
     section {
       border: 1px solid var(--line);
       background: var(--panel);
-      border-radius: 8px;
-      padding: 18px;
+      border-radius: 12px;
+      padding: 20px;
+      box-shadow: var(--shadow);
     }
     .grid {
       display: grid;
@@ -2082,15 +2175,17 @@ function htmlPage() {
       width: 100%;
       min-height: 40px;
       border: 1px solid var(--line);
-      border-radius: 7px;
-      padding: 8px 10px;
+      border-radius: 8px;
+      padding: 8px 12px;
       color: var(--text);
       background: #fff;
       font: inherit;
+      transition: border-color 0.15s, box-shadow 0.15s;
     }
     input:focus, select:focus {
-      outline: 2px solid rgba(15, 118, 110, 0.22);
+      outline: none;
       border-color: var(--accent);
+      box-shadow: 0 0 0 3px rgba(13, 148, 136, 0.12);
     }
     .full { grid-column: 1 / -1; }
     .row {
@@ -2102,27 +2197,29 @@ function htmlPage() {
     button {
       min-height: 40px;
       border: 1px solid transparent;
-      border-radius: 7px;
-      padding: 8px 12px;
+      border-radius: 8px;
+      padding: 8px 14px;
       font: inherit;
       font-weight: 700;
       cursor: pointer;
       background: var(--accent);
       color: #fff;
+      transition: background 0.15s, box-shadow 0.15s, transform 0.1s;
     }
-    button:hover { background: var(--accent-strong); }
+    button:hover { background: var(--accent-strong); box-shadow: 0 2px 6px rgba(0,0,0,0.12); }
+    button:active { transform: scale(0.98); }
     button.secondary {
       background: #fff;
       color: var(--text);
       border-color: var(--line);
     }
-    button.secondary:hover { background: #f3f5f8; }
+    button.secondary:hover { background: #f8f9fb; border-color: #c8ced6; }
     button.danger {
       background: #fff;
       color: var(--danger);
-      border-color: #f0b8b2;
+      border-color: #fecaca;
     }
-    button.danger:hover { background: #fff5f3; }
+    button.danger:hover { background: #fef2f2; border-color: #fca5a5; }
     h2 {
       margin: 0 0 12px;
       font-size: 15px;
@@ -2164,10 +2261,12 @@ function htmlPage() {
     .config-panel {
       display: none;
       margin-top: 14px;
+      animation: fadeIn 0.2s ease;
     }
     .config-panel.open {
       display: block;
     }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
     .profiles {
       display: grid;
       gap: 10px;
@@ -2198,11 +2297,12 @@ function htmlPage() {
       text-align: right;
     }
     .empty-state {
-      border: 1px dashed var(--line);
-      border-radius: 8px;
-      padding: 12px;
+      border: 2px dashed var(--line);
+      border-radius: 10px;
+      padding: 20px;
       color: var(--muted);
-      background: #fbfcfd;
+      background: #fafbfc;
+      text-align: center;
     }
     .promo {
       display: grid;
@@ -2210,10 +2310,10 @@ function htmlPage() {
       gap: 12px;
       align-items: center;
       margin-top: 18px;
-      border: 1px solid #b8e3dc;
-      border-radius: 8px;
-      padding: 12px;
-      background: #f2fbf9;
+      border: 1px solid #99f6e4;
+      border-radius: 10px;
+      padding: 14px 16px;
+      background: linear-gradient(135deg, #f0fdfa, #ecfeff);
     }
     .promo-title {
       margin: 0 0 3px;
@@ -2272,8 +2372,8 @@ function htmlPage() {
       border-radius: 999px;
       background: #a3acba;
     }
-    .status-dot.on { background: var(--accent); }
-    .status-dot.off { background: var(--danger); }
+    .status-dot.on { background: #10b981; box-shadow: 0 0 6px rgba(16,185,129,0.5); }
+    .status-dot.off { background: #ef4444; }
     .service-actions {
       display: flex;
       gap: 8px;
@@ -2285,9 +2385,10 @@ function htmlPage() {
     }
     details.advanced-panel {
       border: 1px solid var(--line);
-      border-radius: 8px;
+      border-radius: 12px;
       background: var(--panel);
       padding: 0;
+      box-shadow: var(--shadow);
     }
     details.advanced-panel summary {
       cursor: pointer;
@@ -2333,11 +2434,13 @@ function htmlPage() {
       align-items: center;
       border: 1px solid var(--line);
       border-radius: 8px;
-      padding: 9px 10px;
+      padding: 10px 12px;
       background: #fff;
       color: var(--muted);
       font-size: 12px;
+      transition: background 0.1s;
     }
+    .mini-row:hover { background: #f8f9fb; }
     .mini-row strong {
       display: block;
       color: var(--text);
@@ -2356,17 +2459,22 @@ function htmlPage() {
       margin-right: 6px;
       background: #a3acba;
     }
-    .health-dot.ok { background: var(--accent); }
-    .health-dot.fail { background: var(--danger); }
+    .health-dot.ok { background: #10b981; box-shadow: 0 0 4px rgba(16,185,129,0.4); }
+    .health-dot.fail { background: #ef4444; box-shadow: 0 0 4px rgba(239,68,68,0.4); }
     .profile-item {
-      display: grid;
-      grid-template-columns: minmax(0, 1fr) auto;
-      gap: 12px;
-      align-items: center;
+      display: block;
       border: 1px solid var(--line);
-      border-radius: 8px;
-      padding: 12px;
+      border-radius: 10px;
+      padding: 14px 16px;
       background: #fbfcfd;
+      transition: box-shadow 0.15s, border-color 0.15s;
+    }
+    .profile-item:hover {
+      box-shadow: var(--shadow-lg);
+      border-color: #c8ced6;
+    }
+    .profile-main {
+      min-width: 0;
     }
     .profile-name {
       font-weight: 800;
@@ -2374,28 +2482,38 @@ function htmlPage() {
     }
     .badge {
       display: inline-block;
-      margin-left: 6px;
-      border: 1px solid #b8e3dc;
+      margin-left: 8px;
+      border: 1px solid #99f6e4;
       border-radius: 999px;
-      padding: 1px 7px;
-      color: #0b5f59;
-      background: #eef8f6;
-      font-size: 12px;
+      padding: 2px 10px;
+      color: #0d9488;
+      background: #f0fdfa;
+      font-size: 11px;
       font-weight: 700;
+      letter-spacing: 0.02em;
     }
     .profile-meta {
       color: var(--muted);
       overflow-wrap: anywhere;
+      line-height: 1.45;
+      margin-top: 2px;
+    }
+    .profile-meta code {
+      white-space: normal;
+      word-break: break-all;
     }
     .profile-actions {
       display: flex;
-      gap: 8px;
+      gap: 6px;
       flex-wrap: wrap;
-      justify-content: flex-end;
+      justify-content: flex-start;
+      margin-top: 14px;
     }
     .profile-actions button {
-      min-height: 34px;
-      padding: 6px 9px;
+      min-height: 32px;
+      padding: 5px 10px;
+      font-size: 12px;
+      border-radius: 6px;
     }
     .field-with-button {
       display: grid;
@@ -2446,12 +2564,12 @@ function htmlPage() {
       top: calc(100% + 6px);
       right: 0;
       width: min(360px, 100%);
-      max-height: 188px;
+      max-height: 200px;
       overflow: auto;
       border: 1px solid var(--line);
-      border-radius: 7px;
+      border-radius: 10px;
       background: #fff;
-      box-shadow: 0 12px 28px rgba(23, 26, 31, 0.14);
+      box-shadow: var(--shadow-lg);
     }
     .model-list.visible {
       display: grid;
@@ -2487,19 +2605,58 @@ function htmlPage() {
     }
     .message {
       margin-top: 14px;
-      padding: 10px 12px;
-      border-radius: 7px;
-      background: #eef8f6;
-      color: #0b5f59;
-      border: 1px solid #b8e3dc;
+      padding: 12px 14px;
+      border-radius: 8px;
+      background: #f0fdfa;
+      color: #0d9488;
+      border: 1px solid #99f6e4;
       display: none;
       white-space: pre-line;
+      font-weight: 500;
     }
     .message.error {
       background: #fff5f3;
       color: var(--danger);
       border-color: #f0b8b2;
     }
+    .message.success {
+      background: #eef8f6;
+      color: #0b5f59;
+      border-color: #b8e3dc;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #0f1117; --panel: #1a1d27; --text: #e2e5ea; --muted: #8b919e;
+        --line: #2d3139; --accent: #2dd4bf; --accent-strong: #14b8a6;
+        --danger: #f87171; --shadow: 0 1px 3px rgba(0,0,0,0.3);
+        --shadow-lg: 0 4px 12px rgba(0,0,0,0.4);
+      }
+      html, body { background: var(--bg); color: var(--text); }
+      input, select { background: #141620; color: var(--text); border-color: var(--line); }
+      input:focus, select:focus { box-shadow: 0 0 0 3px rgba(45,212,191,0.15); }
+      .mini-row, .profile-item, .model-list, .model-option { background: #141620; color: var(--text); border-color: var(--line); }
+      .mini-row:hover { background: #1e2030; }
+      .profile-item:hover { border-color: #3d4150; }
+      button.secondary, .model-menu-button { background: #1a1d27; color: var(--text); border-color: var(--line); }
+      button.secondary:hover, .model-menu-button:hover { background: #252830; }
+      button.danger { background: #1a1d27; color: #f87171; border-color: rgba(248,113,113,0.2); }
+      button.danger:hover { background: #2d1518; }
+      .empty-state { background: #141620; border-color: var(--line); }
+      .language-toggle { background: #1a1d27; border-color: var(--line); }
+      .language-toggle button.active { background: var(--accent); color: #0f1117; }
+      .badge { background: rgba(45,212,191,0.1); color: #2dd4bf; border-color: rgba(45,212,191,0.3); }
+      .message { background: rgba(45,212,191,0.08); color: #2dd4bf; border-color: rgba(45,212,191,0.2); }
+      .message.error { background: rgba(248,113,113,0.08); color: #f87171; border-color: rgba(248,113,113,0.2); }
+      .message.success { background: rgba(52,211,153,0.08); color: #34d399; border-color: rgba(52,211,153,0.2); }
+      .promo { background: linear-gradient(135deg, rgba(45,212,191,0.05), rgba(56,189,248,0.05)); border-color: rgba(45,212,191,0.2); }
+      section { border-color: var(--line); }
+      h1 { background: linear-gradient(135deg, #2dd4bf, #38bdf8); -webkit-background-clip: text; background-clip: text; }
+      .health-dot.ok { background: #34d399; box-shadow: 0 0 4px rgba(52,211,153,0.5); }
+      .health-dot.fail { background: #f87171; box-shadow: 0 0 4px rgba(248,113,113,0.5); }
+      .status-dot.on { background: #34d399; box-shadow: 0 0 6px rgba(52,211,153,0.5); }
+    }
+
     @media (max-width: 760px) {
       header { align-items: stretch; flex-direction: column; }
       .layout { grid-template-columns: 1fr; }
@@ -2548,7 +2705,11 @@ function htmlPage() {
         <section>
           <div class="section-header">
             <h2 data-i18n="profilesTitle">Profiles</h2>
-            <button type="button" id="toggle-config" data-i18n="addProfile">Add Profile</button>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;">
+              <button type="button" class="secondary" id="import-profiles" data-i18n="importBtn">Import</button>
+              <button type="button" class="secondary" id="export-profiles" data-i18n="exportBtn">Export</button>
+              <button type="button" id="toggle-config" data-i18n="addProfile">Add Profile</button>
+            </div>
           </div>
           <div class="config-panel" id="config-panel">
             <form id="profile-form">
@@ -2556,8 +2717,40 @@ function htmlPage() {
                 <label><span data-i18n="nameLabel">Name</span>
                   <input id="name" name="name" value="" autocomplete="off" data-i18n-placeholder="namePlaceholder" required>
                 </label>
+                <label style="display:none"><span data-i18n="profileTypeLabel">Profile type</span>
+                  <select id="profileType" name="profileType">
+                    <option value="relay" data-i18n="profileTypeRelay">Relay / proxy</option>
+                    <option value="official_subscription" data-i18n="profileTypeOfficialSubscription">Official subscription API key</option>
+                  </select>
+                </label>
                 <label class="full"><span data-i18n="baseUrlLabel">Relay base URL</span>
                   <input id="baseUrl" name="baseUrl" value="" autocomplete="off" data-i18n-placeholder="baseUrlPlaceholder" required>
+                </label>
+                <label class="full"><span data-i18n="supportedEndpointLabel">Supported endpoint</span>
+                  <select id="supportedEndpoint" name="supportedEndpoint">
+                    <option value="chat-completions" data-i18n="endpointChatCompletions">/v1/chat/completions · OpenAI compatible</option>
+                    <option value="responses" data-i18n="endpointResponses">/v1/responses · Native OpenAI</option>
+                    <option value="anthropic-messages" data-i18n="endpointAnthropicMessages">/anthropic/v1/messages · Claude compatible</option>
+                  </select>
+                  <span class="field-help" data-i18n="supportedEndpointHelp">Choose the endpoint your provider supports. For Xiaomi and most OpenAI-compatible relays, use /v1/chat/completions.</span>
+                </label>
+                <label class="full" style="display:none"><span data-i18n="anthropicBaseUrlLabel">Anthropic base URL</span>
+                  <input id="anthropicBaseUrl" name="anthropicBaseUrl" value="" autocomplete="off" data-i18n-placeholder="anthropicBaseUrlPlaceholder">
+                </label>
+                <label style="display:none"><span data-i18n="codexProtocolLabel">Codex upstream protocol</span>
+                  <select id="codexUpstreamProtocol" name="codexUpstreamProtocol">
+                    <option value="" data-i18n="protocolAuto">Auto / native Responses</option>
+                    <option value="responses">Responses</option>
+                    <option value="chat-completions">Chat Completions</option>
+                    <option value="completions">Completions</option>
+                  </select>
+                </label>
+                <label style="display:none"><span data-i18n="claudeProtocolLabel">Claude upstream protocol</span>
+                  <select id="claudeUpstreamProtocol" name="claudeUpstreamProtocol">
+                    <option value="" data-i18n="protocolAuto">Auto / native Responses</option>
+                    <option value="anthropic-messages">Anthropic Messages</option>
+                    <option value="chat-completions">Chat Completions</option>
+                  </select>
                 </label>
                 <label class="full"><span data-i18n="apiKeyLabel">API key</span>
                   <input id="apiKey" name="apiKey" type="password" autocomplete="off" placeholder="sk-...">
@@ -2584,54 +2777,11 @@ function htmlPage() {
               <p class="hint" data-i18n="hint">Edit a saved relay from the list, change fields, then Save. Leave API key blank to keep the saved local key.</p>
             </form>
           </div>
-          <div class="target-groups">
-            <div class="target-group">
-              <div class="target-title">
-                <h3 data-i18n="relaysTitle">My relays</h3>
-                <p data-i18n="relaysHint">Saved relay bases appear here.</p>
-              </div>
-              <div class="profiles" id="profiles"></div>
-            </div>
-          </div>
+          <div class="profiles" id="profiles"></div>
         </section>
       </div>
 
       <div class="stack">
-        <details class="advanced-panel">
-          <summary data-i18n="advancedTitle">Advanced: model name mapping</summary>
-          <div class="advanced-body">
-            <p class="hint" data-i18n="routesHint">Only use this when a client must keep one model name while the proxy sends another upstream model.</p>
-            <form class="mini-form" id="route-form">
-              <label><span data-i18n="routeClient">Client</span>
-                <select id="route-client" name="client">
-                  <option value="codex">codex</option>
-                  <option value="claude-code">claude-code</option>
-                </select>
-              </label>
-              <label><span data-i18n="routeModel">Client model</span>
-                <input id="route-model" name="model" autocomplete="off" placeholder="gpt-5.5">
-              </label>
-              <label><span data-i18n="routeProfile">Profile</span>
-                <select id="route-profile" name="profile"></select>
-              </label>
-              <label><span data-i18n="routeUpstream">Upstream model</span>
-                <input id="route-upstream-model" name="upstreamModel" autocomplete="off" placeholder="claude-opus-4-6">
-              </label>
-              <button type="submit" data-i18n="routeSave">Save</button>
-            </form>
-            <div class="mini-list" id="routes-list"></div>
-          </div>
-        </details>
-        <section class="mini-panel">
-            <div class="target-title">
-              <h3 data-i18n="healthTitle">Relay health</h3>
-              <p data-i18n="healthHint">Quick check for saved profiles.</p>
-            </div>
-            <div class="service-actions">
-              <button type="button" class="secondary" id="health-refresh" data-i18n="healthRefresh">Refresh list</button>
-            </div>
-            <div class="mini-list" id="health-list"></div>
-        </section>
         <section class="mini-panel">
             <div class="target-title">
               <h3 data-i18n="requestsTitle">Recent requests</h3>
@@ -2719,8 +2869,22 @@ function htmlPage() {
         profileTitle: "Profile",
         nameLabel: "Name",
         namePlaceholder: "e.g. vayne",
-        baseUrlLabel: "Relay base URL",
-        baseUrlPlaceholder: "https://api.vayne.cc.cd/v1",
+        profileTypeLabel: "Profile type",
+        profileTypeRelay: "Relay / proxy",
+        profileTypeOfficialSubscription: "Official subscription API key",
+        baseUrlLabel: "OpenAI-compatible base URL",
+        baseUrlPlaceholder: "https://token-plan-sgp.xiaomimimo.com/v1",
+        supportedEndpointLabel: "Supported endpoint",
+        endpointChatCompletions: "/v1/chat/completions · OpenAI compatible",
+        endpointResponses: "/v1/responses · Native OpenAI",
+        endpointAnthropicMessages: "/anthropic/v1/messages · Claude compatible",
+        supportedEndpointHelp: "Choose the endpoint your provider supports. For Xiaomi and most OpenAI-compatible relays, use /v1/chat/completions.",
+        anthropicBaseUrlLabel: "Anthropic-compatible base URL",
+        anthropicBaseUrlPlaceholder: "Optional, e.g. https://token-plan-sgp.xiaomimimo.com/anthropic",
+        codexProtocolLabel: "Codex upstream protocol",
+        claudeProtocolLabel: "Claude upstream protocol",
+        protocolAuto: "Auto / native Responses",
+        protocolRecommendedApplied: "Recommended protocols were filled into the form. Click Save to persist them.",
         apiKeyLabel: "API key",
         modelLabel: "Model",
         modelPlaceholder: "Load models or type one manually",
@@ -2729,7 +2893,7 @@ function htmlPage() {
         testAccess: "Test Access",
         save: "Save",
         remove: "Remove",
-        hint: "Edit a saved relay from the list, change fields, then Save. Leave API key blank to keep the saved local key.",
+        hint: "Save relay providers, official subscription API keys, or custom compatible endpoints. Leave API key blank to keep the saved local key.",
         restartCodex: "Choose a client for each relay profile",
         restartCodexHint: "Use for Codex writes Codex API settings and restarts Codex. Use for Claude Code writes Claude Code proxy settings.",
         current: "current",
@@ -2744,6 +2908,14 @@ function htmlPage() {
         saving: "Saving...",
         saved: "Saved",
         removing: "Removing...",
+        removeConfirm: "Remove profile '{name}'?",
+        clone: "Clone",
+        unsavedChanges: "You have unsaved changes. Discard?",
+        importBtn: "Import",
+        exportBtn: "Export",
+        requestsExpand: "Show more",
+        imported: "Imported {count} profile(s).",
+        exported: "Exported.",
         removed: "Removed",
         loadingModels: "Loading models...",
         loadedModels: "Loaded {count} models.",
@@ -2801,8 +2973,22 @@ function htmlPage() {
         profileTitle: "配置",
         nameLabel: "名称",
         namePlaceholder: "例如 vayne",
-        baseUrlLabel: "中转 Base URL",
-        baseUrlPlaceholder: "https://api.vayne.cc.cd/v1",
+        profileTypeLabel: "配置类型",
+        profileTypeRelay: "中转站 / 代理",
+        profileTypeOfficialSubscription: "官方订阅 API Key",
+        baseUrlLabel: "兼容 OpenAI 的 Base URL",
+        baseUrlPlaceholder: "https://token-plan-sgp.xiaomimimo.com/v1",
+        supportedEndpointLabel: "支持的接口",
+        endpointChatCompletions: "/v1/chat/completions · OpenAI 兼容",
+        endpointResponses: "/v1/responses · OpenAI 原生",
+        endpointAnthropicMessages: "/anthropic/v1/messages · Claude 兼容",
+        supportedEndpointHelp: "选择服务商实际支持的接口。小米和大多数 OpenAI 兼容中转站选 /v1/chat/completions。",
+        anthropicBaseUrlLabel: "兼容 Anthropic 的 Base URL",
+        anthropicBaseUrlPlaceholder: "可选，例如 https://token-plan-sgp.xiaomimimo.com/anthropic",
+        codexProtocolLabel: "Codex 上游协议",
+        claudeProtocolLabel: "Claude 上游协议",
+        protocolAuto: "自动 / 原生 Responses",
+        protocolRecommendedApplied: "已把推荐协议填入表单。需要写入配置时请点击“保存”。",
         apiKeyLabel: "API 密钥",
         modelLabel: "模型",
         modelPlaceholder: "读取模型或手动输入",
@@ -2811,7 +2997,7 @@ function htmlPage() {
         testAccess: "检测接入",
         save: "保存",
         remove: "删除",
-        hint: "从列表点编辑后修改并保存。API 密钥留空会继续使用已保存的本地密钥。",
+        hint: "可以保存中转站、官方订阅 API Key 或自定义兼容端点。API 密钥留空会继续使用已保存的本地密钥。",
         restartCodex: "为每个中转配置选择客户端",
         restartCodexHint: "用于 Codex 会写入 Codex API 设置并重启 Codex；用于 Claude Code 会写入 Claude Code 代理设置。",
         current: "当前",
@@ -2826,6 +3012,14 @@ function htmlPage() {
         saving: "正在保存...",
         saved: "已保存",
         removing: "正在删除...",
+        removeConfirm: "确定要删除配置 \'{name}\' 吗？",
+        clone: "复制",
+        unsavedChanges: "有未保存的修改，确定丢弃？",
+        importBtn: "导入",
+        exportBtn: "导出",
+        requestsExpand: "展开更多",
+        imported: "已导入 {count} 个配置。",
+        exported: "已导出。",
         removed: "已删除",
         loadingModels: "正在读取模型...",
         loadedModels: "已读取 {count} 个模型。",
@@ -2865,14 +3059,27 @@ function htmlPage() {
 
     function values() {
       const data = Object.fromEntries(new FormData(form).entries());
+      if (data.supportedEndpoint === "chat-completions") {
+        data.codexUpstreamProtocol = "chat-completions";
+        data.claudeUpstreamProtocol = "chat-completions";
+        data.anthropicBaseUrl = "";
+      } else if (data.supportedEndpoint === "responses") {
+        data.codexUpstreamProtocol = "responses";
+        data.claudeUpstreamProtocol = "";
+        data.anthropicBaseUrl = "";
+      } else if (data.supportedEndpoint === "anthropic-messages") {
+        data.codexUpstreamProtocol = "";
+        data.claudeUpstreamProtocol = "anthropic-messages";
+        data.anthropicBaseUrl = data.anthropicBaseUrl || data.baseUrl;
+      }
       data.useEnv = false;
       data.restartCodex = true;
       return data;
     }
 
-    function setMessage(text, isError = false) {
+    function setMessage(text, isError = false, isSuccess = false) {
       message.textContent = text;
-      message.className = isError ? "message error" : "message";
+      message.className = isError ? "message error" : isSuccess ? "message success" : "message";
       message.style.display = "block";
     }
 
@@ -2935,10 +3142,12 @@ function htmlPage() {
       renderRequests(payload.recent || []);
     }
 
+    let currentProxyStatus = null;
     async function loadProxyStatus() {
       try {
         const response = await fetch("/api/proxy/status");
-        renderProxyStatus(await response.json());
+        currentProxyStatus = await response.json();
+        renderProxyStatus(currentProxyStatus);
       } catch (error) {
         proxyStatus.textContent = error.message;
         proxyDot.className = "status-dot off";
@@ -2946,10 +3155,23 @@ function htmlPage() {
     }
 
     function loadProfile(profile) {
+      if (formDirty && !window.confirm(t("unsavedChanges"))) { return; }
+      formDirty = false;
       setConfigOpen(true);
       document.querySelector("#name").value = profile.name;
+      document.querySelector("#profileType").value = profile.profileType || profile.type || "relay";
       modelInput.value = profile.model || "";
       document.querySelector("#baseUrl").value = profile.baseUrl || "";
+      document.querySelector("#anthropicBaseUrl").value = profile.anthropicBaseUrl || "";
+      document.querySelector("#codexUpstreamProtocol").value = profile.codexUpstreamProtocol || profile.upstreamProtocol || "";
+      document.querySelector("#claudeUpstreamProtocol").value = profile.claudeUpstreamProtocol || "";
+      const codexProtocol = profile.codexUpstreamProtocol || profile.upstreamProtocol || "";
+      const claudeProtocol = profile.claudeUpstreamProtocol || "";
+      let supportedEndpoint = "responses";
+      if (claudeProtocol === "anthropic-messages") supportedEndpoint = "anthropic-messages";
+      else if (codexProtocol === "chat-completions" || claudeProtocol === "chat-completions") supportedEndpoint = "chat-completions";
+      else if (codexProtocol === "responses") supportedEndpoint = "responses";
+      document.querySelector("#supportedEndpoint").value = supportedEndpoint;
       document.querySelector("#apiKey").value = "";
       renderModels([]);
       updateModelLabel();
@@ -2976,17 +3198,18 @@ function htmlPage() {
 
     function renderRequests(requests) {
       requestList.innerHTML = requests.length
-        ? requests.slice(0, 12).map((entry) => {
+        ? requests.slice(0, requestLimit).map((entry) => {
           const at = entry.at ? new Date(entry.at).toLocaleTimeString() : "";
           const ok = entry.ok === false ? "fail" : "ok";
           const status = entry.status || "";
           const duration = entry.durationMs === undefined ? "" : " · " + entry.durationMs + "ms";
           const model = entry.upstreamModel || entry.model || "";
           const profile = entry.profile ? " · " + entry.profile : "";
+          const protocol = entry.protocol ? " · " + entry.protocol : "";
           return '<div class="mini-row">' +
             '<div>' +
               '<strong><span class="health-dot ' + ok + '"></span>' + escapeHtml(model || "request") + '</strong>' +
-              '<span>' + escapeHtml([at, entry.client || "", entry.family || ""].filter(Boolean).join(" · ") + profile) + '</span>' +
+              '<span>' + escapeHtml([at, entry.client || "", entry.family || ""].filter(Boolean).join(" · ") + profile + protocol) + '</span>' +
             '</div>' +
             '<span>' + escapeHtml(String(status) + duration) + '</span>' +
           '</div>';
@@ -2996,9 +3219,14 @@ function htmlPage() {
 
     function formatCapabilities(payload) {
       const probes = Array.isArray(payload.probes) ? payload.probes : [];
-      return probes.map((probe) => {
-        return probe.name + ": " + (probe.ok ? "ok" : "fail") + " (" + (probe.status || 0) + ", " + probe.durationMs + "ms" + (probe.error ? ", " + probe.error : "") + ")";
-      }).join("\\n");
+      const lines = probes.map((probe) => {
+        return probe.name + ": " + (probe.ok ? "ok" : "fail") + " (" + (probe.status || 0) + ", " + probe.durationMs + "ms" + (probe.url ? ", " + probe.url : "") + (probe.error ? ", " + probe.error : "") + ")";
+      });
+      if (payload.recommended) {
+        lines.push("recommended.codexUpstreamProtocol: " + (payload.recommended.codexUpstreamProtocol || "none"));
+        lines.push("recommended.claudeUpstreamProtocol: " + (payload.recommended.claudeUpstreamProtocol || "none"));
+      }
+      return lines.join("\\n");
     }
 
     function renderModels(models) {
@@ -3034,19 +3262,28 @@ function htmlPage() {
       updateModelLabel();
     }
 
-    function profileHtml(profile) {
+    function truncateUrl(url) {
+      if (!url) return "";
+      try { const u = new URL(url); let p = u.pathname; while (p.endsWith("/")) p = p.slice(0, -1); return u.hostname + p.slice(0, 30); } catch { return url.slice(0, 40); }
+    }
+    let formDirty = false;
+    function markDirty() { formDirty = true; }
+    form.addEventListener("input", markDirty);
+    form.addEventListener("change", markDirty);
+
+    function profileHtml(profile, activeProfile, activeClaudeProfile) {
+
         return '<div class="profile-item" data-name="' + escapeHtml(profile.name) + '">' +
-          '<div>' +
+          '<div class="profile-main">' +
             '<div class="profile-name">' + escapeHtml(profile.label || profile.name) + (profile.isDefault ? '<span class="badge">' + escapeHtml(t("current")) + '</span>' : '') + '</div>' +
-            '<div class="profile-meta">' + escapeHtml(profile.model) + ' · ' + escapeHtml(profile.baseUrl) + '</div>' +
-            '<div class="profile-meta"><code>' + escapeHtml(profile.command) + '</code></div>' +
+            (profile.model ? '<div class="profile-meta"><code>' + escapeHtml(profile.model) + '</code> · ' + escapeHtml(truncateUrl(profile.baseUrl)) + '</div>' : '') +
           '</div>' +
           '<div class="profile-actions">' +
             '<button class="secondary" data-action="load">' + escapeHtml(t("edit")) + '</button>' +
-            '<button class="secondary" data-action="codex">' + escapeHtml(t("useCodex")) + '</button>' +
-            '<button class="secondary" data-action="claude">' + escapeHtml(t("useClaude")) + '</button>' +
+            '<button class="secondary" data-action="codex">' + escapeHtml(profile.name === activeProfile ? '✓ ' + t("useCodex") : t("useCodex")) + '</button>' +
+            '<button class="secondary" data-action="claude">' + escapeHtml(profile.name === activeClaudeProfile ? '✓ ' + t("useClaude") : t("useClaude")) + '</button>' +
             '<button class="secondary" data-action="test">' + escapeHtml(t("test")) + '</button>' +
-            '<button class="secondary" data-action="capabilities">' + escapeHtml(t("capabilityCheck")) + '</button>' +
+            '<button class="secondary" data-action="clone">' + escapeHtml(t("clone")) + '</button>' +
             '<button class="danger" data-action="remove">' + escapeHtml(t("remove")) + '</button>' +
           '</div>' +
         '</div>';
@@ -3059,6 +3296,11 @@ function htmlPage() {
           const profile = profiles.find((entry) => entry.name === item.dataset.name);
           if (button.dataset.action === "load") {
             loadProfile(profile);
+            return;
+          }
+          if (button.dataset.action === "clone") {
+            loadProfile({ ...profile, name: profile.name + "-copy" });
+            document.querySelector("#name").value = profile.name + "-copy";
             return;
           }
           if (button.dataset.action === "test") {
@@ -3074,7 +3316,12 @@ function htmlPage() {
             setMessage(t("capabilityChecking"));
             try {
               const payload = await post("/api/profile/capabilities", { name: profile.name });
-              setMessage(t("capabilityDone", { name: profile.name }) + "\\n" + formatCapabilities(payload));
+              loadProfile(profile);
+              if (payload.recommended) {
+                document.querySelector("#codexUpstreamProtocol").value = payload.recommended.codexUpstreamProtocol || "";
+                document.querySelector("#claudeUpstreamProtocol").value = payload.recommended.claudeUpstreamProtocol || "";
+              }
+              setMessage(t("capabilityDone", { name: profile.name }) + "\\n" + t("protocolRecommendedApplied") + "\\n" + formatCapabilities(payload));
             } catch (error) {
               setMessage(error.message, true);
             }
@@ -3118,14 +3365,18 @@ function htmlPage() {
       const payload = await response.json();
       const relayProfiles = payload.profiles || [];
 
+      const _ap = currentProxyStatus?.activeProfile || "";
+      const _ac = currentProxyStatus?.activeClaudeProfile || "";
       profilesEl.innerHTML = relayProfiles.length
-        ? relayProfiles.map(profileHtml).join("")
+        ? relayProfiles.map((p) => profileHtml(p, _ap, _ac)).join("")
         : '<div class="empty-state">' + escapeHtml(t("emptyRelays")) + '</div>';
 
       bindProfileActions(profilesEl, relayProfiles);
-      routeProfile.innerHTML = relayProfiles.length
-        ? relayProfiles.map((profile) => '<option value="' + escapeHtml(profile.name) + '">' + escapeHtml(profile.name) + '</option>').join("")
-        : '<option value=""></option>';
+      if (routeProfile) {
+        routeProfile.innerHTML = relayProfiles.length
+          ? relayProfiles.map((profile) => '<option value="' + escapeHtml(profile.name) + '">' + escapeHtml(profile.name) + '</option>').join("")
+          : '<option value=""></option>';
+      }
       await loadRoutes();
     }
 
@@ -3140,6 +3391,7 @@ function htmlPage() {
     }
 
     function bindRouteActions() {
+      if (!routesList) return;
       routesList.querySelectorAll("button[data-action='remove-route']").forEach((button) => {
         button.addEventListener("click", async () => {
           const row = button.closest(".mini-row");
@@ -3158,6 +3410,7 @@ function htmlPage() {
     }
 
     function renderRoutes(routes) {
+      if (!routesList) return;
       routesList.innerHTML = routes.length
         ? routes.map(routeHtml).join("")
         : '<div class="hint">' + escapeHtml(t("noRoutes")) + '</div>';
@@ -3175,30 +3428,8 @@ function htmlPage() {
       }
     }
 
-    function renderHealth(profiles) {
-      healthList.innerHTML = profiles.length
-        ? profiles.map((profile) => {
-          return '<div class="mini-row">' +
-            '<div>' +
-              '<strong><span class="health-dot ok"></span>' + escapeHtml(profile.name) + '</strong>' +
-              '<span>' + escapeHtml((profile.model || '') + ' · ' + (profile.baseUrl || '')) + '</span>' +
-            '</div>' +
-          '</div>';
-        }).join("")
-        : '<div class="hint">' + escapeHtml(t("noHealth")) + '</div>';
-    }
-
-    async function loadHealth() {
-      healthList.innerHTML = '<div class="hint">' + escapeHtml(t("healthLoading")) + '</div>';
-      try {
-        const response = await fetch("/api/profiles");
-        const payload = await response.json();
-        if (!response.ok) throw new Error(payload.error || "Request failed.");
-        renderHealth(payload.profiles || []);
-      } catch (error) {
-        healthList.innerHTML = '<div class="hint">' + escapeHtml(error.message) + '</div>';
-      }
-    }
+    function renderHealth() {}
+    async function loadHealth() {}
 
     async function loadRequests() {
       try {
@@ -3243,7 +3474,8 @@ function htmlPage() {
       setMessage(t("saving"));
       try {
         const payload = await post("/api/setup", values());
-        setMessage(payload.message);
+        setMessage(payload.message, false, true);
+        formDirty = false;
         updateCommand();
         await loadProfiles();
       } catch (error) {
@@ -3252,6 +3484,8 @@ function htmlPage() {
     });
 
     document.querySelector("#remove").addEventListener("click", async () => {
+      const name = document.querySelector("#name").value || "";
+      if (!window.confirm(t("removeConfirm", { name }))) return;
       setMessage(t("removing"));
       try {
         const payload = await post("/api/remove", values());
@@ -3300,7 +3534,7 @@ function htmlPage() {
       }
     });
 
-    routeForm.addEventListener("submit", async (event) => {
+    if (routeForm) routeForm.addEventListener("submit", async (event) => {
       event.preventDefault();
       const data = Object.fromEntries(new FormData(routeForm).entries());
       try {
@@ -3312,7 +3546,7 @@ function htmlPage() {
       }
     });
 
-    document.querySelector("#health-refresh").addEventListener("click", async () => {
+    document.querySelector("#health-refresh")?.addEventListener("click", async () => {
       await loadHealth();
     });
     document.querySelector("#requests-refresh").addEventListener("click", async () => {
@@ -3322,6 +3556,49 @@ function htmlPage() {
       await loadServiceStatus();
     });
 
+    // Import/Export
+    document.querySelector("#import-profiles").addEventListener("click", () => {
+      const input = document.createElement("input");
+      input.type = "file"; input.accept = ".json";
+      input.addEventListener("change", async () => {
+        const file = input.files[0]; if (!file) return;
+        try {
+          const text = await file.text();
+          const payload = await post("/api/profiles/import", { json: text });
+          setMessage(payload.message);
+          await loadProfiles();
+        } catch (error) { setMessage(error.message, true); }
+      });
+      input.click();
+    });
+    document.querySelector("#export-profiles").addEventListener("click", async () => {
+      try {
+        const response = await fetch("/api/profiles/export");
+        const payload = await response.json();
+        const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a"); a.href = url; a.download = "api-switch-profiles.json"; a.click();
+        URL.revokeObjectURL(url);
+      } catch (error) { setMessage(error.message, true); }
+    });
+
+    // Expand request log
+    let requestLimit = 12;
+    document.querySelector("#requests-expand")?.addEventListener("click", () => {
+      requestLimit += 20;
+      loadRequests();
+    });
+
+    document.querySelector("#supportedEndpoint").addEventListener("change", (event) => {
+      const anthropicField = document.querySelector("#anthropicBaseUrl").closest("label");
+      if (event.target.value === "anthropic-messages") {
+        anthropicField.style.display = "";
+        const field = document.querySelector("#anthropicBaseUrl");
+        if (!field.value) field.value = document.querySelector("#baseUrl").value;
+      } else {
+        anthropicField.style.display = "none";
+      }
+    });
     document.querySelector("#lang-zh").addEventListener("click", () => {
       lang = "zh";
       localStorage.setItem("api-switch-lang", lang);
@@ -3349,58 +3626,59 @@ function htmlPage() {
 
 async function runRelayTest(profile, apiKey) {
   if (!profile) throw new Error("Relay profile is required.");
-  const chatBody = JSON.stringify({
-    model: profile.model,
-    messages: [{ role: "user", content: "Reply with exactly: ok" }],
-    max_tokens: 8,
-    stream: false,
-  });
-  const response = await fetch(chatCompletionsUrl(profile.baseUrl), {
-    method: "POST",
-    headers: {
-      authorization: `Bearer ${apiKey}`,
-      "content-type": "application/json",
-      accept: "application/json",
-    },
-    body: chatBody,
-  });
-  const text = await response.text();
-  if (!response.ok && [400, 404, 405].includes(response.status) && /^gpt-|^o[134]/i.test(profile.model || "")) {
-    const fallback = await fetch(responsesUrl(profile.baseUrl), {
-      method: "POST",
-      headers: {
-        authorization: `Bearer ${apiKey}`,
-        "content-type": "application/json",
-        accept: "application/json",
-      },
-      body: JSON.stringify({
-        model: profile.model,
-        input: "Reply with exactly: ok",
-        max_output_tokens: 8,
-        stream: false,
-      }),
-    });
-    const fallbackText = await fallback.text();
-    if (!fallback.ok) {
-      throw new Error(`Relay test failed with HTTP ${fallback.status}: ${parseErrorMessage(fallbackText) || fallbackText.slice(0, 240)}`);
-    }
-    return `Responses fallback ok (${fallback.status}).`;
+  const protocol = profile.codexUpstreamProtocol || profile.upstreamProtocol || "";
+  const headers = { authorization: `Bearer ${apiKey}`, "content-type": "application/json", accept: "application/json" };
+
+  let url, body;
+  if (protocol === "chat-completions") {
+    url = chatCompletionsUrl(profile.baseUrl);
+    body = JSON.stringify({ model: profile.model, messages: [{ role: "user", content: "Reply with exactly: ok" }], max_tokens: 8, stream: false });
+  } else if (protocol === "completions") {
+    url = completionsUrl(profile.baseUrl);
+    body = JSON.stringify({ model: profile.model, prompt: "Reply with exactly: ok", max_tokens: 8, stream: false });
+  } else {
+    url = responsesUrl(profile.baseUrl);
+    body = JSON.stringify({ model: profile.model, input: "Reply with exactly: ok", max_output_tokens: 8, stream: false });
   }
+
+  const response = await fetch(url, { method: "POST", headers, body });
+  const text = await response.text();
   if (!response.ok) {
     throw new Error(`Relay test failed with HTTP ${response.status}: ${parseErrorMessage(text) || text.slice(0, 240)}`);
   }
-  return `Chat completions ok (${response.status}).`;
+  return `${protocol || "responses"} ok (${response.status}).`;
 }
 
 function normalizeWebPayload(body) {
   const name = String(body.name || "").trim();
+  const supportedEndpoint = String(body.supportedEndpoint || "").trim();
+  let anthropicBaseUrl = String(body.anthropicBaseUrl || "").trim();
+  let codexUpstreamProtocol = String(body.codexUpstreamProtocol || body.upstreamProtocol || "").trim();
+  let claudeUpstreamProtocol = String(body.claudeUpstreamProtocol || "").trim();
+  if (supportedEndpoint === "chat-completions") {
+    codexUpstreamProtocol = "chat-completions";
+    claudeUpstreamProtocol = "chat-completions";
+    anthropicBaseUrl = "";
+  } else if (supportedEndpoint === "responses") {
+    codexUpstreamProtocol = "responses";
+    claudeUpstreamProtocol = "";
+    anthropicBaseUrl = "";
+  } else if (supportedEndpoint === "anthropic-messages") {
+    codexUpstreamProtocol = "";
+    claudeUpstreamProtocol = "anthropic-messages";
+    anthropicBaseUrl = anthropicBaseUrl || String(body.baseUrl || "").trim();
+  }
   return {
     name,
+    profileType: String(body.profileType || body.type || "relay").trim() || "relay",
     baseUrl: String(body.baseUrl || "").trim(),
+    anthropicBaseUrl,
+    codexUpstreamProtocol,
+    claudeUpstreamProtocol,
     model: String(body.model || "").trim(),
     keyEnv: body.useEnv ? String(body.keyEnv || "").trim() : undefined,
     secret: body.useEnv ? undefined : String(body.apiKey || "").trim(),
-    fallbackProfiles: String(body.fallbackProfiles || "").split(",").map((name) => name.trim()).filter(Boolean).join(","),
+    fallbackProfiles: String(body.fallbackProfiles || "").split(",").map((name) => name.trim()).filter(Boolean),
     restartCodex: Boolean(body.restartCodex),
   };
 }
@@ -3502,7 +3780,10 @@ function startWeb(args) {
     return `http://${host}:${actualPort}/v1`;
   };
   const recordProxyRequest = (entry) => {
-    const record = { ...entry, at: new Date().toISOString() };
+    const target = entry.profile || proxyState.clients[entry.client || "codex"]?.targetProfile || "";
+    const managed = target ? getManagedProfile(codexHome, target) : null;
+    const protocol = managed ? (managed.codexUpstreamProtocol || managed.upstreamProtocol || "responses") : "";
+    const record = { ...entry, protocol, at: new Date().toISOString() };
     recentProxyRequests.unshift(record);
     recentProxyRequests.splice(50);
     appendProxyRequest(codexHome, record);
@@ -3613,6 +3894,28 @@ function startWeb(args) {
 
       if (req.method === "GET" && url.pathname === "/api/logs") {
         sendJson(res, 200, { recent: readRecentProxyRequests(codexHome, 100) });
+        return;
+      }
+
+      if (req.method === "GET" && url.pathname === "/api/profiles/export") {
+        const profiles = listProfiles(codexHome);
+        sendJson(res, 200, { version: 1, profiles });
+        return;
+      }
+
+      if (req.method === "POST" && url.pathname === "/api/profiles/import") {
+        const payload = await readJson(req);
+        const data = JSON.parse(String(payload.json || "{}"));
+        const imported = data.profiles || {};
+        const store = readProfilesStore(codexHome);
+        let count = 0;
+        for (const [name, profile] of Object.entries(imported)) {
+          if (!profile || typeof profile !== "object") continue;
+          store[name] = { ...store[name], ...profile, name, updatedAt: new Date().toISOString() };
+          count += 1;
+        }
+        writeProfilesStore(codexHome, store);
+        sendJson(res, 200, { message: `Imported ${count} profile(s).`, count });
         return;
       }
 
