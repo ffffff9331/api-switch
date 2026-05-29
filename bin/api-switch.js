@@ -510,6 +510,7 @@ function accountCommand(args) {
     noMigrateHistory: args.noMigrateHistory,
   });
   const migration = result.migration;
+  const encryptedRepair = result.encryptedRepair;
   console.log("Set Codex to use ChatGPT account login.");
   if (migration) {
     console.log(`Moved ${migration.changed} thread(s) to provider: openai`);
@@ -517,6 +518,11 @@ function accountCommand(args) {
     if (migration.rolloutModelChanged) console.log(`Updated ${migration.rolloutModelChanged} rollout model file(s).`);
     if (migration.repairedRolloutPaths) console.log(`Repaired ${migration.repairedRolloutPaths} rollout path(s).`);
     console.log(`Backup: ${migration.backupPath}`);
+  }
+  if (encryptedRepair) {
+    console.log(`Repaired encrypted content in ${encryptedRepair.filesChanged} rollout file(s).`);
+    console.log(`Removed encrypted_content from ${encryptedRepair.cleanedLines} line(s).`);
+    console.log(`Dropped ${encryptedRepair.droppedLines} hidden reasoning/compaction line(s).`);
   }
   if (args.restartCodex) {
     const restart = tryRestartCodexApp();
@@ -1418,6 +1424,19 @@ function repairEncryptedContentCommand(args) {
   if (!fs.existsSync(rolloutPath)) throw new Error(`Rollout file not found: ${rolloutPath}`);
 
   const stamp = new Date().toISOString().replace(/[-:.TZ]/g, "").slice(0, 14);
+  const repair = repairEncryptedContentInRollout(rolloutPath, stamp);
+  console.log(`Thread: ${threadId}`);
+  console.log(`Rollout: ${rolloutPath}`);
+  if (!repair.changed) {
+    console.log("No encrypted_content entries needed repair.");
+    return;
+  }
+  console.log(`Removed encrypted_content from ${repair.cleanedLines} line(s).`);
+  console.log(`Dropped ${repair.droppedLines} hidden reasoning/compaction line(s).`);
+  console.log(`Backup: ${repair.backupPath}`);
+}
+
+function repairEncryptedContentInRollout(rolloutPath, stamp) {
   let cleanedLines = 0;
   let droppedLines = 0;
   const changed = rewriteRolloutJsonLines(
@@ -1440,16 +1459,43 @@ function repairEncryptedContentCommand(args) {
     },
     stamp,
   );
+  return {
+    changed,
+    cleanedLines,
+    droppedLines,
+    backupPath: changed ? `${rolloutPath}.api-switch-${stamp}.bak` : "",
+  };
+}
 
-  console.log(`Thread: ${threadId}`);
-  console.log(`Rollout: ${rolloutPath}`);
-  if (!changed) {
-    console.log("No encrypted_content entries needed repair.");
-    return;
+function repairEncryptedContentForAccountMode(codexHome, stamp) {
+  const stateDb = path.join(codexHome, "state_5.sqlite");
+  if (!fs.existsSync(stateDb)) return null;
+  const rolloutPaths = Array.from(new Set(
+    sqlite(
+      stateDb,
+      "select rollout_path from threads where archived = 0 and coalesce(rollout_path, '') != '';",
+    )
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean),
+  ));
+
+  let filesChanged = 0;
+  let cleanedLines = 0;
+  let droppedLines = 0;
+  const backups = [];
+  for (const rolloutPath of rolloutPaths) {
+    if (!fs.existsSync(rolloutPath)) continue;
+    const repair = repairEncryptedContentInRollout(rolloutPath, stamp);
+    if (!repair.changed) continue;
+    filesChanged += 1;
+    cleanedLines += repair.cleanedLines;
+    droppedLines += repair.droppedLines;
+    backups.push(repair.backupPath);
   }
-  console.log(`Removed encrypted_content from ${cleanedLines} line(s).`);
-  console.log(`Dropped ${droppedLines} hidden reasoning/compaction line(s).`);
-  console.log(`Backup: ${rolloutPath}.api-switch-${stamp}.bak`);
+
+  if (!filesChanged) return null;
+  return { filesChanged, cleanedLines, droppedLines, backups };
 }
 
 function clearDefaultProfile(codexHome) {
@@ -1631,6 +1677,7 @@ function switchCodexToProxyMode(codexHome, profile, proxyBaseUrl, options = {}) 
 function switchCodexToAccountMode(codexHome, options = {}) {
   const snapshot = snapshotCodexSwitchFiles(codexHome);
   try {
+    const stamp = new Date().toISOString().replace(/[-:.TZ]/g, "").slice(0, 14);
     const wasProxyMode = Boolean(currentOpenaiBaseUrl(codexHome));
     cleanupLegacyManagedBlocks(codexHome);
     clearDefaultProfile(codexHome);
@@ -1646,7 +1693,8 @@ function switchCodexToAccountMode(codexHome, options = {}) {
     proxyState.clients.codex.targetProfile = "";
     writeProxySettings(codexHome, proxyState);
     const migration = options.noMigrateHistory ? null : migrateThreads(codexHome, "openai");
-    return { migration, proxyState };
+    const encryptedRepair = options.noMigrateHistory ? null : repairEncryptedContentForAccountMode(codexHome, stamp);
+    return { migration, proxyState, encryptedRepair };
   } catch (error) {
     restoreCodexSwitchFiles(codexHome, snapshot);
     throw error;
@@ -4196,6 +4244,7 @@ function startWeb(args) {
         Object.assign(proxyState, result.proxyState || readProxySettings(codexHome));
         proxyState.clients = (result.proxyState || readProxySettings(codexHome)).clients;
         const migration = result.migration;
+        const encryptedRepair = result.encryptedRepair;
         const restart = payload.restartCodex ? tryRestartCodexApp() : null;
         const diagnostics = proxyDiagnostics(codexHome, proxyUrl());
         const details = [
@@ -4205,6 +4254,9 @@ function startWeb(args) {
             : "Threads already use the account provider.",
           "Run: codex",
         ];
+        if (encryptedRepair) {
+          details.splice(2, 0, `Repaired encrypted content in ${encryptedRepair.filesChanged} rollout file(s), removed encrypted_content from ${encryptedRepair.cleanedLines} line(s), and dropped ${encryptedRepair.droppedLines} hidden reasoning/compaction line(s).`);
+        }
         if (restart && !restart.ok) details.push(restart.message);
         if (!diagnostics.ready) {
           const failed = diagnostics.checks.filter((check) => !check.ok && check.level !== "warning").map((check) => check.label).join("; ");

@@ -1567,6 +1567,51 @@ describe("api-switch", () => {
     assert.equal(fs.readdirSync(dir).some((name) => name.includes(".api-switch-") && name.endsWith(".bak")), true);
   });
 
+  it("automatically repairs encrypted content when switching back to account mode", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "api-switch-"));
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, "config.toml"), 'openai_base_url = "http://127.0.0.1:18600/v1"\nforced_login_method = "api"\n');
+    fs.writeFileSync(path.join(dir, "auth.json"), `${JSON.stringify({ auth_mode: "apikey", OPENAI_API_KEY: "api-switch" }, null, 2)}\n`);
+    fs.mkdirSync(path.join(dir, "api-switch"), { recursive: true });
+    fs.writeFileSync(path.join(dir, "api-switch", "proxy-settings.json"), JSON.stringify({
+      enabled: true,
+      clients: { codex: { targetProfile: "vayne" }, "claude-code": { targetProfile: "" } },
+    }));
+    const dbPath = path.join(dir, "state_5.sqlite");
+    const rollout = path.join(dir, "account-repair.jsonl");
+    fs.writeFileSync(
+      rollout,
+      [
+        JSON.stringify({ type: "session_meta", payload: { id: "account-repair", model_provider: "openai" } }),
+        JSON.stringify({ type: "response_item", payload: { type: "reasoning", encrypted_content: "bad-ciphertext", content: null } }),
+        JSON.stringify({ type: "response_item", payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: "visible" }] } }),
+        "",
+      ].join("\n"),
+    );
+    spawnSync(
+      "sqlite3",
+      [
+        dbPath,
+        [
+          "create table threads (id text primary key, archived integer default 0, model text, model_provider text, rollout_path text, created_at integer, updated_at integer, created_at_ms integer, updated_at_ms integer);",
+          `insert into threads (id, archived, model, model_provider, rollout_path, created_at, updated_at, created_at_ms, updated_at_ms) values ('account-repair', 0, 'gpt-5.5', 'vayne', '${rollout.replace(/'/g, "''")}', 1, 2, 1000, 2000);`,
+        ].join(" "),
+      ],
+      { encoding: "utf8", env: spawnEnv },
+    );
+
+    const result = spawnSync(process.execPath, [bin, "account", "--codex-home", dir], {
+      encoding: "utf8",
+      env: spawnEnv,
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /Repaired encrypted content in 1 rollout file\(s\)/);
+    const repaired = fs.readFileSync(rollout, "utf8");
+    assert.doesNotMatch(repaired, /encrypted_content/);
+    assert.match(repaired, /visible/);
+  });
+
   it("advertises the web UI command", () => {
     const result = spawnSync(process.execPath, [bin, "--help"], {
       encoding: "utf8",
