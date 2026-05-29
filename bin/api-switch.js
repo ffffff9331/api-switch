@@ -30,6 +30,7 @@ Usage:
   api-switch setup --name xiaomi --type official_subscription --base-url https://token-plan-sgp.xiaomimimo.com/v1 --anthropic-base-url https://token-plan-sgp.xiaomimimo.com/anthropic --model mimo-v2.5-pro
   api-switch model --name <profile> --model <model>
   api-switch thread-model --model <model> [--provider <provider>] [--thread <id>]
+  api-switch repair-encrypted-content [--thread <id>]
   api-switch route --client <client> --model <model> --profile <profile> [--upstream-model <model>]
   api-switch route-remove --client <client> --model <model>
   api-switch routes
@@ -52,7 +53,7 @@ Options:
   --reasoning-effort <val> Defaults to medium
   --fallback-profiles <a,b> Optional backup profiles for transient 5xx failures
   --state-db <path>        Defaults to ~/.codex/state_5.sqlite
-  --thread <id>            Thread id for thread-model; defaults to latest thread
+  --thread <id>            Thread id for thread-model or repair-encrypted-content; defaults to latest thread
   --provider <provider>    Provider for thread-model; defaults to openai
   --type <type>            Profile type: relay or official_subscription
   --profile-type <type>    Alias for --type
@@ -977,6 +978,10 @@ function backupFile(filePath, stamp) {
   return backupPath;
 }
 
+function threadRolloutPath(stateDb, threadId) {
+  return sqlite(stateDb, `select coalesce(rollout_path, '') from threads where id = ${sqlString(threadId)};`);
+}
+
 function readRolloutFirstLine(rolloutPath) {
   const fd = fs.openSync(rolloutPath, "r");
   const chunks = [];
@@ -1369,6 +1374,82 @@ function threadModelCommand(args) {
   console.log(`Model: ${args.model}`);
   console.log(`Provider: ${provider}`);
   console.log(`Backup: ${backupPath}`);
+}
+
+function hasEncryptedContent(value) {
+  if (!value || typeof value !== "object") return false;
+  if (Array.isArray(value)) return value.some(hasEncryptedContent);
+  if (Object.prototype.hasOwnProperty.call(value, "encrypted_content")) return true;
+  return Object.values(value).some(hasEncryptedContent);
+}
+
+function removeEncryptedContent(value) {
+  if (!value || typeof value !== "object") return value;
+  if (Array.isArray(value)) return value.map(removeEncryptedContent);
+  const next = {};
+  for (const [key, item] of Object.entries(value)) {
+    if (key === "encrypted_content") continue;
+    next[key] = removeEncryptedContent(item);
+  }
+  return next;
+}
+
+function shouldDropEncryptedRolloutEntry(entry) {
+  const payload = entry && entry.payload;
+  if (!payload || !hasEncryptedContent(payload)) return false;
+
+  // Hidden reasoning/compaction state is safe to drop when the ciphertext is
+  // no longer valid for the active account. Visible user/assistant text is
+  // preserved by falling back to field-level encrypted_content removal.
+  if (entry.type === "response_item" && (payload.type === "reasoning" || payload.type === "compaction")) return true;
+  if (payload.type === "reasoning" || payload.type === "compaction") return true;
+  return false;
+}
+
+function repairEncryptedContentCommand(args) {
+  const codexHome = expandHome(args.codexHome || "~/.codex");
+  const stateDb = expandHome(args.stateDb || path.join(codexHome, "state_5.sqlite"));
+  if (!fs.existsSync(stateDb)) throw new Error(`Codex state database not found: ${stateDb}`);
+
+  const threadId = args.thread || latestThreadId(stateDb);
+  if (!threadId) throw new Error("No non-archived Codex thread found.");
+  const rolloutPath = threadRolloutPath(stateDb, threadId);
+  if (!rolloutPath) throw new Error(`Thread has no rollout path: ${threadId}`);
+  if (!fs.existsSync(rolloutPath)) throw new Error(`Rollout file not found: ${rolloutPath}`);
+
+  const stamp = new Date().toISOString().replace(/[-:.TZ]/g, "").slice(0, 14);
+  let cleanedLines = 0;
+  let droppedLines = 0;
+  const changed = rewriteRolloutJsonLines(
+    rolloutPath,
+    (line) => {
+      if (!line.trim() || !line.includes("encrypted_content")) return line;
+      let entry;
+      try {
+        entry = JSON.parse(line);
+      } catch {
+        return line;
+      }
+      if (!hasEncryptedContent(entry)) return line;
+      if (shouldDropEncryptedRolloutEntry(entry)) {
+        droppedLines += 1;
+        return "";
+      }
+      cleanedLines += 1;
+      return JSON.stringify(removeEncryptedContent(entry));
+    },
+    stamp,
+  );
+
+  console.log(`Thread: ${threadId}`);
+  console.log(`Rollout: ${rolloutPath}`);
+  if (!changed) {
+    console.log("No encrypted_content entries needed repair.");
+    return;
+  }
+  console.log(`Removed encrypted_content from ${cleanedLines} line(s).`);
+  console.log(`Dropped ${droppedLines} hidden reasoning/compaction line(s).`);
+  console.log(`Backup: ${rolloutPath}.api-switch-${stamp}.bak`);
 }
 
 function clearDefaultProfile(codexHome) {
@@ -4329,6 +4410,11 @@ async function main() {
 
   if (args.command === "thread-model") {
     threadModelCommand(args);
+    return;
+  }
+
+  if (args.command === "repair-encrypted-content") {
+    repairEncryptedContentCommand(args);
     return;
   }
 

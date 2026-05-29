@@ -1525,6 +1525,48 @@ describe("api-switch", () => {
     assert.equal(fs.readdirSync(dir).filter((name) => name.includes(".bak")).length, 1);
   });
 
+  it("repairs invalid encrypted content in the latest rollout without removing visible messages", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "api-switch-"));
+    const dbPath = path.join(dir, "state_5.sqlite");
+    const rollout = path.join(dir, "encrypted.jsonl");
+    fs.writeFileSync(
+      rollout,
+      [
+        JSON.stringify({ type: "session_meta", payload: { id: "encrypted", model_provider: "openai" } }),
+        JSON.stringify({ type: "response_item", payload: { type: "reasoning", encrypted_content: "bad-ciphertext", content: null } }),
+        JSON.stringify({ type: "response_item", payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: "visible" }], encrypted_content: "bad-message-ciphertext" } }),
+        JSON.stringify({ type: "event_msg", payload: { type: "user_message", text: "keep me" } }),
+        "",
+      ].join("\n"),
+    );
+    spawnSync(
+      "sqlite3",
+      [
+        dbPath,
+        [
+          "create table threads (id text primary key, archived integer default 0, model text, model_provider text, rollout_path text, created_at integer, updated_at integer, created_at_ms integer, updated_at_ms integer);",
+          `insert into threads (id, archived, model, model_provider, rollout_path, created_at, updated_at, created_at_ms, updated_at_ms) values ('encrypted', 0, 'gpt-5.5', 'openai', '${rollout.replace(/'/g, "''")}', 1, 2, 1000, 2000);`,
+        ].join(" "),
+      ],
+      { encoding: "utf8", env: spawnEnv },
+    );
+
+    const result = spawnSync(
+      process.execPath,
+      [bin, "repair-encrypted-content", "--codex-home", dir],
+      { encoding: "utf8", env: spawnEnv },
+    );
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /Dropped 1 hidden reasoning\/compaction line\(s\)/);
+    assert.match(result.stdout, /Removed encrypted_content from 1 line\(s\)/);
+    const repaired = fs.readFileSync(rollout, "utf8");
+    assert.doesNotMatch(repaired, /encrypted_content/);
+    assert.match(repaired, /visible/);
+    assert.match(repaired, /keep me/);
+    assert.equal(fs.readdirSync(dir).some((name) => name.includes(".api-switch-") && name.endsWith(".bak")), true);
+  });
+
   it("advertises the web UI command", () => {
     const result = spawnSync(process.execPath, [bin, "--help"], {
       encoding: "utf8",
@@ -1542,6 +1584,7 @@ describe("api-switch", () => {
     assert.match(result.stdout, /--restart-codex/);
     assert.match(result.stdout, /api-switch model --name <profile> --model <model>/);
     assert.match(result.stdout, /api-switch thread-model --model <model>/);
+    assert.match(result.stdout, /api-switch repair-encrypted-content/);
   });
 
   it("reports a friendly error when the default port is already in use", async () => {
