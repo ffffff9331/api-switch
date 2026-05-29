@@ -1066,24 +1066,99 @@ function rewriteRolloutFirstLine(rolloutPath, firstLine, info, stamp) {
   fs.renameSync(tempPath, rolloutPath);
 }
 
+const ROLLOUT_REWRITE_CHUNK_BYTES = 4 * 1024 * 1024;
+const ROLLOUT_MAX_TRANSFORM_LINE_BYTES = 32 * 1024 * 1024;
+
 function rewriteRolloutJsonLines(rolloutPath, transformLine, stamp) {
   if (!rolloutPath || !fs.existsSync(rolloutPath)) return false;
-  const original = fs.readFileSync(rolloutPath, "utf8");
-  const hasTrailingNewline = original.endsWith("\n");
-  const lines = original.split("\n");
-  if (hasTrailingNewline) lines.pop();
-
+  const tempPath = `${rolloutPath}.api-switch-${stamp}.${process.pid}.tmp`;
+  const inFd = fs.openSync(rolloutPath, "r");
+  const outFd = fs.openSync(tempPath, "wx", 0o600);
+  const buffer = Buffer.allocUnsafe(ROLLOUT_REWRITE_CHUNK_BYTES);
+  const lineChunks = [];
+  let lineBytes = 0;
+  let oversizedLine = false;
   let changed = false;
-  const nextLines = lines.map((line) => {
+
+  const resetLine = () => {
+    lineChunks.length = 0;
+    lineBytes = 0;
+    oversizedLine = false;
+  };
+
+  const writeBufferParts = () => {
+    for (const chunk of lineChunks) fs.writeSync(outFd, chunk);
+  };
+
+  const appendLineSegment = (segment) => {
+    if (!segment.length) return;
+    if (oversizedLine) {
+      fs.writeSync(outFd, segment);
+      return;
+    }
+    if (lineBytes + segment.length > ROLLOUT_MAX_TRANSFORM_LINE_BYTES) {
+      writeBufferParts();
+      fs.writeSync(outFd, segment);
+      lineChunks.length = 0;
+      lineBytes = 0;
+      oversizedLine = true;
+      return;
+    }
+    lineChunks.push(Buffer.from(segment));
+    lineBytes += segment.length;
+  };
+
+  const finishLine = (hasNewline) => {
+    if (oversizedLine) {
+      if (hasNewline) fs.writeSync(outFd, "\n");
+      resetLine();
+      return;
+    }
+
+    const line = Buffer.concat(lineChunks, lineBytes).toString("utf8");
     const updated = transformLine(line);
     if (updated !== line) changed = true;
-    return updated;
-  });
-  if (!changed) return false;
+    fs.writeSync(outFd, updated);
+    if (hasNewline) fs.writeSync(outFd, "\n");
+    resetLine();
+  };
+
+  try {
+    while (true) {
+      const bytesRead = fs.readSync(inFd, buffer, 0, buffer.length, null);
+      if (!bytesRead) break;
+
+      let segmentStart = 0;
+      for (let index = 0; index < bytesRead; index += 1) {
+        if (buffer[index] !== 0x0a) continue;
+        appendLineSegment(buffer.subarray(segmentStart, index));
+        finishLine(true);
+        segmentStart = index + 1;
+      }
+      appendLineSegment(buffer.subarray(segmentStart, bytesRead));
+    }
+
+    if (oversizedLine || lineBytes > 0) finishLine(false);
+  } catch (error) {
+    try {
+      fs.unlinkSync(tempPath);
+    } catch (_) {
+      // Best effort cleanup.
+    }
+    throw error;
+  } finally {
+    fs.closeSync(inFd);
+    fs.closeSync(outFd);
+  }
+
+  if (!changed) {
+    fs.unlinkSync(tempPath);
+    return false;
+  }
 
   backupFile(rolloutPath, stamp);
-  const body = `${nextLines.join("\n")}${hasTrailingNewline ? "\n" : ""}`;
-  fs.writeFileSync(rolloutPath, body, { mode: 0o600 });
+  fs.renameSync(tempPath, rolloutPath);
+  fs.chmodSync(rolloutPath, 0o600);
   return true;
 }
 
