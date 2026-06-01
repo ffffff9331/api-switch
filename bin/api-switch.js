@@ -2215,6 +2215,16 @@ function startProxy(args) {
   const host = args.host || "127.0.0.1";
   const port = Number(args.port || DEFAULT_PORT);
   const codexHome = expandHome(args.codexHome || "~/.codex");
+  const recordProxyRequest = (entry) => {
+    const proxyState = readProxySettings(codexHome);
+    const target = entry.profile || proxyState.clients[entry.client || "codex"]?.targetProfile || "";
+    const managed = target ? getManagedProfile(codexHome, target) : null;
+    const protocol = managed ? (managed.codexUpstreamProtocol || managed.upstreamProtocol || "responses") : "";
+    const record = { ...entry, protocol, at: new Date().toISOString() };
+    updateProxyHealth(proxyState, record);
+    writeProxySettings(codexHome, proxyState);
+    appendProxyRequest(codexHome, record);
+  };
   startProxyServer({
     host,
     port,
@@ -2227,6 +2237,9 @@ function startProxy(args) {
     getFallbackProfiles: (client) => proxyFallbackProfiles(codexHome, client),
     getApiKey: profileApiKey,
     debugDir: apiSwitchDataPath(codexHome),
+    recordRequest: recordProxyRequest,
+    isProfileAvailable: (profileName) => isProxyProfileAvailable(readProxySettings(codexHome), profileName),
+    streamingFirstChunkTimeoutMs: Number(process.env.API_SWITCH_STREAM_FIRST_CHUNK_TIMEOUT_MS || 60000),
   });
 }
 
@@ -3913,6 +3926,7 @@ function readProxySettings(codexHome) {
       codex: { targetProfile: "" },
       "claude-code": { targetProfile: "" },
     },
+    health: {},
   };
   if (!fs.existsSync(settingsPath)) return defaults;
   try {
@@ -3929,10 +3943,43 @@ function readProxySettings(codexHome) {
           targetProfile: typeof clients["claude-code"]?.targetProfile === "string" ? clients["claude-code"].targetProfile : "",
         },
       },
+      health: settings.health && typeof settings.health === "object" ? settings.health : {},
     };
   } catch {
     return defaults;
   }
+}
+
+function updateProxyHealth(proxyState, entry) {
+  const profile = entry && entry.profile;
+  if (!profile) return null;
+  if (!proxyState.health || typeof proxyState.health !== "object") proxyState.health = {};
+  const current = proxyState.health[profile] && typeof proxyState.health[profile] === "object" ? proxyState.health[profile] : {};
+  const nowIso = new Date().toISOString();
+  const failures = entry.ok ? 0 : Number(current.consecutiveFailures || 0) + 1;
+  const next = {
+    ...current,
+    profile,
+    state: failures >= 4 ? "open" : "closed",
+    consecutiveFailures: failures,
+    lastStatus: entry.status,
+    lastError: entry.ok ? "" : String(entry.error || ""),
+    lastErrorCategory: entry.ok ? "" : String(entry.errorCategory || ""),
+    lastUpdatedAt: nowIso,
+  };
+  if (entry.ok) next.lastSuccessAt = nowIso;
+  else next.lastFailureAt = nowIso;
+  if (failures >= 4) next.openUntil = new Date(Date.now() + 60000).toISOString();
+  else delete next.openUntil;
+  proxyState.health[profile] = next;
+  return next;
+}
+
+function isProxyProfileAvailable(proxyState, profileName) {
+  if (!profileName) return true;
+  const health = proxyState.health && proxyState.health[profileName];
+  if (!health || health.state !== "open" || !health.openUntil) return true;
+  return Date.parse(health.openUntil) <= Date.now();
 }
 
 function writeProxySettings(codexHome, settings) {
@@ -3988,6 +4035,8 @@ function startWeb(args) {
     const managed = target ? getManagedProfile(codexHome, target) : null;
     const protocol = managed ? (managed.codexUpstreamProtocol || managed.upstreamProtocol || "responses") : "";
     const record = { ...entry, protocol, at: new Date().toISOString() };
+    updateProxyHealth(proxyState, record);
+    writeProxySettings(codexHome, proxyState);
     recentProxyRequests.unshift(record);
     recentProxyRequests.splice(50);
     appendProxyRequest(codexHome, record);
@@ -4009,6 +4058,8 @@ function startWeb(args) {
     getApiKey: profileApiKey,
     debugDir: apiSwitchDataPath(codexHome),
     recordRequest: recordProxyRequest,
+    isProfileAvailable: (profileName) => isProxyProfileAvailable(proxyState, profileName),
+    streamingFirstChunkTimeoutMs: Number(process.env.API_SWITCH_STREAM_FIRST_CHUNK_TIMEOUT_MS || 60000),
   });
 
   server = http.createServer(async (req, res) => {
@@ -4050,6 +4101,7 @@ function startWeb(args) {
           activeClaudeProfile: claudeTarget || null,
           activeClaudeModel: claudeProfile ? claudeProfile.model : null,
           clients: proxyState.clients,
+          health: proxyState.health || {},
           recent: recentProxyRequests,
         });
         return;

@@ -3715,6 +3715,73 @@ describe("api-switch", () => {
     }
   });
 
+  it("falls back when a streaming upstream sends headers but no first chunk", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "api-switch-"));
+    let primaryAttempts = 0;
+    let backupAttempts = 0;
+    const primarySockets = new Set();
+    const primary = http.createServer(async (req, res) => {
+      primaryAttempts += 1;
+      for await (const _chunk of req) {
+        // Drain request body before returning a stalled stream.
+      }
+      primarySockets.add(res.socket);
+      res.writeHead(200, { "content-type": "text/event-stream; charset=utf-8" });
+      res.flushHeaders();
+    });
+    const backup = http.createServer(async (req, res) => {
+      backupAttempts += 1;
+      for await (const _chunk of req) {
+        // Drain request body.
+      }
+      res.writeHead(200, { "content-type": "text/event-stream; charset=utf-8" });
+      res.end('event: response.created\ndata: {"type":"response.created","response":{"id":"resp_backup","object":"response","status":"in_progress","model":"gpt-5.5","output":[]}}\n\nevent: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"backup"}\n\nevent: response.completed\ndata: {"type":"response.completed","response":{"id":"resp_backup","object":"response","status":"completed","model":"gpt-5.5","output":[]}}\n\ndata: [DONE]\n\n');
+    });
+    await new Promise((resolve) => primary.listen(0, "127.0.0.1", resolve));
+    await new Promise((resolve) => backup.listen(0, "127.0.0.1", resolve));
+
+    spawnSync(process.execPath, [bin, "setup", "--codex-home", dir, "--name", "backup", "--base-url", `http://127.0.0.1:${backup.address().port}/v1`, "--model", "gpt-5.5"], {
+      input: "sk-backup\n",
+      encoding: "utf8",
+      env: spawnEnv,
+    });
+    const setup = spawnSync(process.execPath, [bin, "setup", "--codex-home", dir, "--name", "primary", "--base-url", `http://127.0.0.1:${primary.address().port}/v1`, "--model", "gpt-5.5", "--fallback-profiles", "backup"], {
+      input: "sk-primary\n",
+      encoding: "utf8",
+      env: spawnEnv,
+    });
+    assert.equal(setup.status, 0, setup.stderr);
+    const activate = spawnSync(process.execPath, [bin, "default", "--codex-home", dir, "--name", "primary"], { encoding: "utf8", env: spawnEnv });
+    assert.equal(activate.status, 0, activate.stderr);
+    const server = spawn(process.execPath, [bin, "proxy", "--codex-home", dir, "--host", "127.0.0.1", "--port", "0"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      env: { ...process.env, API_SWITCH_STREAM_FIRST_CHUNK_TIMEOUT_MS: "100" },
+    });
+
+    try {
+      const baseUrl = await waitForProxyUrl(server);
+      const response = await fetch(`${baseUrl}/responses`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: "gpt-5.5", input: "hello", stream: true }),
+      });
+      const payload = await response.text();
+      assert.equal(response.status, 200);
+      assert.match(payload, /resp_backup/);
+      assert.match(payload, /backup/);
+      assert.equal(primaryAttempts, 1);
+      assert.equal(backupAttempts, 1);
+      const logs = fs.readFileSync(path.join(dir, "api-switch", "proxy-requests.jsonl"), "utf8");
+      assert.match(logs, /upstream_first_chunk_timeout/);
+    } finally {
+      server.kill();
+      for (const socket of primarySockets) socket.destroy();
+      primary.close();
+      backup.close();
+    }
+  });
+
   it("configures Claude Code to use and leave the local proxy", () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "api-switch-"));
     const claudeDir = fs.mkdtempSync(path.join(os.tmpdir(), "claude-home-"));
