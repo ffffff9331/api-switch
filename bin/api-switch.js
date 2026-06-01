@@ -2036,6 +2036,15 @@ function proxyDiagnostics(codexHome, proxyBaseUrl) {
     }
   }
   add("target-key", "Proxy upstream API key is available", keyOk, keyOk ? "Key file or environment variable is available." : "Missing key file or environment variable.");
+  if (profile) {
+    const codexProtocol = profile.codexUpstreamProtocol || profile.upstreamProtocol || "responses";
+    const validProtocol = ["responses", "chat-completions", "completions"].includes(codexProtocol);
+    const missingFallbacks = (profile.fallbackProfiles || []).filter((name) => !getManagedProfile(codexHome, name));
+    add("target-base-url", "Proxy upstream Base URL is configured", Boolean(profile.baseUrl), profile.baseUrl || "Missing baseUrl.");
+    add("target-model", "Proxy upstream model is configured", Boolean(profile.model), profile.model || "Missing model.");
+    add("target-protocol", "Proxy upstream protocol is valid", validProtocol, codexProtocol || "No protocol set.");
+    add("fallback-profiles", "Fallback profile references exist", missingFallbacks.length === 0, missingFallbacks.length ? `Missing: ${missingFallbacks.join(", ")}` : "All fallback profiles exist.", "warning");
+  }
   add("codex-base-url", "Codex API Base URL points to the local proxy", openaiBaseUrl === proxyBaseUrl, openaiBaseUrl || "No openai_base_url set.");
   add("forced-api", "Codex login method is API for proxy mode", forcedLoginMethod === "api", forcedLoginMethod || "No forced_login_method set.");
   add("proxy-api-key", "Codex API key is the local proxy key", hasProxyAuth, hasProxyAuth ? "Using api-switch as local proxy key." : "auth.json is not using the local proxy key.");

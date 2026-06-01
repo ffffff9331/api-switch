@@ -223,6 +223,33 @@ describe("api-switch", () => {
     assert.match(payload.messages[0].content, /Image input omitted/);
   });
 
+  it("passes OpenAI chat compatibility fields through the Responses bridge", () => {
+    const payload = responsesToChatPayload({
+      model: "gpt-5.5",
+      input: "hello",
+      stream: true,
+      metadata: { trace: "abc" },
+      seed: 7,
+      service_tier: "default",
+      logprobs: true,
+      top_logprobs: 2,
+      logit_bias: { "1": -1 },
+      n: 1,
+      reasoning: { effort: "high" },
+    }, "gpt-5.5");
+
+    assert.deepEqual(payload.stream_options, { include_usage: true });
+    assert.deepEqual(payload.metadata, { trace: "abc" });
+    assert.equal(payload.seed, 7);
+    assert.equal(payload.service_tier, "default");
+    assert.equal(payload.logprobs, true);
+    assert.equal(payload.top_logprobs, 2);
+    assert.deepEqual(payload.logit_bias, { "1": -1 });
+    assert.equal(payload.n, 1);
+    assert.equal(payload.reasoning_effort, "high");
+    assert.deepEqual(payload.reasoning, { effort: "high" });
+  });
+
   it("writes a relay profile outside Codex config", () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "api-switch-"));
     const result = spawnSync(
@@ -2202,6 +2229,53 @@ describe("api-switch", () => {
     } finally {
       server.kill();
       upstream.close();
+    }
+  });
+
+  it("diagnostics reports relay profile completeness problems", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "api-switch-"));
+    const setup = spawnSync(process.execPath, [
+      bin,
+      "setup",
+      "--codex-home",
+      dir,
+      "--name",
+      "vayne",
+      "--base-url",
+      "https://relay.example/v1",
+      "--model",
+      "gpt-5.5",
+      "--fallback-profiles",
+      "missing-backup",
+    ], {
+      input: "sk-test\n",
+      encoding: "utf8",
+      env: spawnEnv,
+    });
+    assert.equal(setup.status, 0, setup.stderr);
+    const activate = spawnSync(process.execPath, [bin, "default", "--codex-home", dir, "--name", "vayne"], { encoding: "utf8", env: spawnEnv });
+    assert.equal(activate.status, 0, activate.stderr);
+
+    const server = spawn(process.execPath, [bin, "web", "--codex-home", dir, "--host", "127.0.0.1", "--port", "0", "--no-open"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+
+    try {
+      const webUrl = await waitForWebUrl(server);
+      const diagnostics = await fetch(`${webUrl}/api/diagnostics`);
+      const payload = await diagnostics.json();
+      const fallback = payload.checks.find((check) => check.id === "fallback-profiles");
+      assert.equal(diagnostics.status, 200);
+      assert.equal(payload.mode, "proxy");
+      assert.equal(payload.checks.find((check) => check.id === "target-base-url").ok, true);
+      assert.equal(payload.checks.find((check) => check.id === "target-model").ok, true);
+      assert.equal(payload.checks.find((check) => check.id === "target-protocol").ok, true);
+      assert.equal(fallback.ok, false);
+      assert.equal(fallback.level, "warning");
+      assert.match(fallback.detail, /missing-backup/);
+    } finally {
+      server.kill();
     }
   });
 
