@@ -2522,6 +2522,136 @@ describe("api-switch", () => {
     }
   });
 
+  it("retries once when upstream closes before response headers", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "api-switch-"));
+    let attempts = 0;
+    const upstream = http.createServer(async (req, res) => {
+      if (req.method === "POST" && req.url === "/v1/responses") {
+        attempts += 1;
+        for await (const _chunk of req) {
+          // Drain the request before deciding the simulated upstream outcome.
+        }
+        if (attempts === 1) {
+          res.socket.destroy();
+          return;
+        }
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ ok: true, attempts }));
+        return;
+      }
+      if (req.method === "GET" && req.url === "/v1/models") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ data: [{ id: "gpt-5.5" }] }));
+        return;
+      }
+      res.writeHead(404, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "not found" }));
+    });
+
+    await new Promise((resolve) => upstream.listen(0, "127.0.0.1", resolve));
+    const setup = spawnSync(
+      process.execPath,
+      [
+        bin,
+        "setup",
+        "--codex-home",
+        dir,
+        "--name",
+        "vayne",
+        "--base-url",
+        `http://127.0.0.1:${upstream.address().port}/v1`,
+        "--model",
+        "gpt-5.5",
+      ],
+      { input: "sk-test\n", encoding: "utf8", env: spawnEnv },
+    );
+    assert.equal(setup.status, 0, setup.stderr);
+    const activate = spawnSync(process.execPath, [bin, "default", "--codex-home", dir, "--name", "vayne"], { encoding: "utf8", env: spawnEnv });
+    assert.equal(activate.status, 0, activate.stderr);
+
+    const server = spawn(process.execPath, [bin, "proxy", "--codex-home", dir, "--host", "127.0.0.1", "--port", "0"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+
+    try {
+      const baseUrl = await waitForProxyUrl(server);
+      const response = await fetch(`${baseUrl}/responses`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: "gpt-5.5", input: "hello" }),
+      });
+      const payload = await response.json();
+      assert.equal(response.status, 200);
+      assert.deepEqual(payload, { ok: true, attempts: 2 });
+      assert.equal(attempts, 2);
+    } finally {
+      server.kill();
+      upstream.close();
+    }
+  });
+
+  it("returns a diagnostic message when upstream connection retry fails", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "api-switch-"));
+    let attempts = 0;
+    const upstream = http.createServer(async (req, res) => {
+      if (req.method === "POST" && req.url === "/v1/responses") {
+        attempts += 1;
+        for await (const _chunk of req) {
+          // Drain the request so undici reports an upstream response failure.
+        }
+        res.socket.destroy();
+        return;
+      }
+      res.writeHead(404, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "not found" }));
+    });
+
+    await new Promise((resolve) => upstream.listen(0, "127.0.0.1", resolve));
+    const setup = spawnSync(
+      process.execPath,
+      [
+        bin,
+        "setup",
+        "--codex-home",
+        dir,
+        "--name",
+        "vayne",
+        "--base-url",
+        `http://127.0.0.1:${upstream.address().port}/v1`,
+        "--model",
+        "gpt-5.5",
+      ],
+      { input: "sk-test\n", encoding: "utf8", env: spawnEnv },
+    );
+    assert.equal(setup.status, 0, setup.stderr);
+    const activate = spawnSync(process.execPath, [bin, "default", "--codex-home", dir, "--name", "vayne"], { encoding: "utf8", env: spawnEnv });
+    assert.equal(activate.status, 0, activate.stderr);
+
+    const server = spawn(process.execPath, [bin, "proxy", "--codex-home", dir, "--host", "127.0.0.1", "--port", "0"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+
+    try {
+      const baseUrl = await waitForProxyUrl(server);
+      const response = await fetch(`${baseUrl}/responses`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: "gpt-5.5", input: "hello" }),
+      });
+      const payload = await response.json();
+      assert.equal(response.status, 502);
+      assert.match(payload.error, /Upstream connection failed before response headers/);
+      assert.match(payload.error, /\/v1\/responses/);
+      assert.match(payload.error, /after 2\/2 attempt/);
+      assert.equal(attempts, 2);
+    } finally {
+      server.kill();
+      upstream.close();
+    }
+  });
+
   it("does not retry generation requests after upstream 429 and passes trace headers through", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "api-switch-"));
     let attempts = 0;
