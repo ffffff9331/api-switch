@@ -30,7 +30,6 @@ Usage:
   api-switch setup --name xiaomi --type official_subscription --base-url https://token-plan-sgp.xiaomimimo.com/v1 --anthropic-base-url https://token-plan-sgp.xiaomimimo.com/anthropic --model mimo-v2.5-pro
   api-switch model --name <profile> --model <model>
   api-switch thread-model --model <model> [--provider <provider>] [--thread <id>]
-  api-switch repair-encrypted-content [--thread <id>]
   api-switch route --client <client> --model <model> --profile <profile> [--upstream-model <model>]
   api-switch route-remove --client <client> --model <model>
   api-switch routes
@@ -53,19 +52,19 @@ Options:
   --reasoning-effort <val> Defaults to medium
   --fallback-profiles <a,b> Optional backup profiles for transient 5xx failures
   --state-db <path>        Defaults to ~/.codex/state_5.sqlite
-  --thread <id>            Thread id for thread-model or repair-encrypted-content; defaults to latest thread
+  --thread <id>            Thread id for thread-model; defaults to latest thread
   --provider <provider>    Provider for thread-model; defaults to openai
   --type <type>            Profile type: relay or official_subscription
   --profile-type <type>    Alias for --type
   --anthropic-base-url <url> Optional Anthropic-compatible base URL for Claude Code
-  --codex-upstream-protocol <protocol> responses, chat-completions, or completions
-  --claude-upstream-protocol <protocol> anthropic-messages or chat-completions
+  --codex-upstream-protocol <protocol> responses, chat-completions, completions, or anthropic-messages
+  --claude-upstream-protocol <protocol> anthropic-messages, chat-completions, responses, or responses-compact
   --client <client>        Client id for routes, default codex
   --upstream-model <model> Model sent to the upstream relay for a mapped route
   --delete-key             Delete the local key file when removing a profile
   --host <host>            Web server host, default 127.0.0.1
   --port <port>            Web server port, default 18600
-  --no-open                Do not open the web UI in a browser
+  --no-open                Do not open the management page in a browser
   --no-migrate-history     Do not rewrite local Codex thread metadata
   --restart-codex          Restart the macOS Codex app after switching
   --force                  Overwrite an existing key file without prompting
@@ -137,8 +136,8 @@ function validateChoice(label, value, allowed) {
 
 function validateProfileOptions(args) {
   validateChoice("Profile type", args.profileType || args.type || "relay", ["relay", "official_subscription"]);
-  validateChoice("Codex upstream protocol", args.codexUpstreamProtocol || args.upstreamProtocol || "", ["responses", "chat-completions", "completions"]);
-  validateChoice("Claude upstream protocol", args.claudeUpstreamProtocol || "", ["anthropic-messages", "chat-completions"]);
+  validateChoice("Codex upstream protocol", args.codexUpstreamProtocol || args.upstreamProtocol || "", ["responses", "chat-completions", "completions", "anthropic-messages"]);
+  validateChoice("Claude upstream protocol", args.claudeUpstreamProtocol || "", ["anthropic-messages", "chat-completions", "responses", "responses-compact"]);
 }
 
 function tomlString(value) {
@@ -510,7 +509,6 @@ function accountCommand(args) {
     noMigrateHistory: args.noMigrateHistory,
   });
   const migration = result.migration;
-  const encryptedRepair = result.encryptedRepair;
   console.log("Set Codex to use ChatGPT account login.");
   if (migration) {
     console.log(`Moved ${migration.changed} thread(s) to provider: openai`);
@@ -518,11 +516,6 @@ function accountCommand(args) {
     if (migration.rolloutModelChanged) console.log(`Updated ${migration.rolloutModelChanged} rollout model file(s).`);
     if (migration.repairedRolloutPaths) console.log(`Repaired ${migration.repairedRolloutPaths} rollout path(s).`);
     console.log(`Backup: ${migration.backupPath}`);
-  }
-  if (encryptedRepair) {
-    console.log(`Repaired encrypted content in ${encryptedRepair.filesChanged} rollout file(s).`);
-    console.log(`Removed encrypted_content from ${encryptedRepair.cleanedLines} line(s).`);
-    console.log(`Dropped ${encryptedRepair.droppedLines} hidden reasoning/compaction line(s).`);
   }
   if (args.restartCodex) {
     const restart = tryRestartCodexApp();
@@ -984,10 +977,6 @@ function backupFile(filePath, stamp) {
   return backupPath;
 }
 
-function threadRolloutPath(stateDb, threadId) {
-  return sqlite(stateDb, `select coalesce(rollout_path, '') from threads where id = ${sqlString(threadId)};`);
-}
-
 function readRolloutFirstLine(rolloutPath) {
   const fd = fs.openSync(rolloutPath, "r");
   const chunks = [];
@@ -1077,99 +1066,24 @@ function rewriteRolloutFirstLine(rolloutPath, firstLine, info, stamp) {
   fs.renameSync(tempPath, rolloutPath);
 }
 
-const ROLLOUT_REWRITE_CHUNK_BYTES = 4 * 1024 * 1024;
-const ROLLOUT_MAX_TRANSFORM_LINE_BYTES = 32 * 1024 * 1024;
-
 function rewriteRolloutJsonLines(rolloutPath, transformLine, stamp) {
   if (!rolloutPath || !fs.existsSync(rolloutPath)) return false;
-  const tempPath = `${rolloutPath}.api-switch-${stamp}.${process.pid}.tmp`;
-  const inFd = fs.openSync(rolloutPath, "r");
-  const outFd = fs.openSync(tempPath, "wx", 0o600);
-  const buffer = Buffer.allocUnsafe(ROLLOUT_REWRITE_CHUNK_BYTES);
-  const lineChunks = [];
-  let lineBytes = 0;
-  let oversizedLine = false;
+  const original = fs.readFileSync(rolloutPath, "utf8");
+  const hasTrailingNewline = original.endsWith("\n");
+  const lines = original.split("\n");
+  if (hasTrailingNewline) lines.pop();
+
   let changed = false;
-
-  const resetLine = () => {
-    lineChunks.length = 0;
-    lineBytes = 0;
-    oversizedLine = false;
-  };
-
-  const writeBufferParts = () => {
-    for (const chunk of lineChunks) fs.writeSync(outFd, chunk);
-  };
-
-  const appendLineSegment = (segment) => {
-    if (!segment.length) return;
-    if (oversizedLine) {
-      fs.writeSync(outFd, segment);
-      return;
-    }
-    if (lineBytes + segment.length > ROLLOUT_MAX_TRANSFORM_LINE_BYTES) {
-      writeBufferParts();
-      fs.writeSync(outFd, segment);
-      lineChunks.length = 0;
-      lineBytes = 0;
-      oversizedLine = true;
-      return;
-    }
-    lineChunks.push(Buffer.from(segment));
-    lineBytes += segment.length;
-  };
-
-  const finishLine = (hasNewline) => {
-    if (oversizedLine) {
-      if (hasNewline) fs.writeSync(outFd, "\n");
-      resetLine();
-      return;
-    }
-
-    const line = Buffer.concat(lineChunks, lineBytes).toString("utf8");
+  const nextLines = lines.map((line) => {
     const updated = transformLine(line);
     if (updated !== line) changed = true;
-    fs.writeSync(outFd, updated);
-    if (hasNewline) fs.writeSync(outFd, "\n");
-    resetLine();
-  };
-
-  try {
-    while (true) {
-      const bytesRead = fs.readSync(inFd, buffer, 0, buffer.length, null);
-      if (!bytesRead) break;
-
-      let segmentStart = 0;
-      for (let index = 0; index < bytesRead; index += 1) {
-        if (buffer[index] !== 0x0a) continue;
-        appendLineSegment(buffer.subarray(segmentStart, index));
-        finishLine(true);
-        segmentStart = index + 1;
-      }
-      appendLineSegment(buffer.subarray(segmentStart, bytesRead));
-    }
-
-    if (oversizedLine || lineBytes > 0) finishLine(false);
-  } catch (error) {
-    try {
-      fs.unlinkSync(tempPath);
-    } catch (_) {
-      // Best effort cleanup.
-    }
-    throw error;
-  } finally {
-    fs.closeSync(inFd);
-    fs.closeSync(outFd);
-  }
-
-  if (!changed) {
-    fs.unlinkSync(tempPath);
-    return false;
-  }
+    return updated;
+  });
+  if (!changed) return false;
 
   backupFile(rolloutPath, stamp);
-  fs.renameSync(tempPath, rolloutPath);
-  fs.chmodSync(rolloutPath, 0o600);
+  const body = `${nextLines.join("\n")}${hasTrailingNewline ? "\n" : ""}`;
+  fs.writeFileSync(rolloutPath, body, { mode: 0o600 });
   return true;
 }
 
@@ -1382,122 +1296,6 @@ function threadModelCommand(args) {
   console.log(`Backup: ${backupPath}`);
 }
 
-function hasEncryptedContent(value) {
-  if (!value || typeof value !== "object") return false;
-  if (Array.isArray(value)) return value.some(hasEncryptedContent);
-  if (Object.prototype.hasOwnProperty.call(value, "encrypted_content")) return true;
-  return Object.values(value).some(hasEncryptedContent);
-}
-
-function removeEncryptedContent(value) {
-  if (!value || typeof value !== "object") return value;
-  if (Array.isArray(value)) return value.map(removeEncryptedContent);
-  const next = {};
-  for (const [key, item] of Object.entries(value)) {
-    if (key === "encrypted_content") continue;
-    next[key] = removeEncryptedContent(item);
-  }
-  return next;
-}
-
-function shouldDropEncryptedRolloutEntry(entry) {
-  const payload = entry && entry.payload;
-  if (!payload || !hasEncryptedContent(payload)) return false;
-
-  // Hidden reasoning/compaction state is safe to drop when the ciphertext is
-  // no longer valid for the active account. Visible user/assistant text is
-  // preserved by falling back to field-level encrypted_content removal.
-  if (entry.type === "response_item" && (payload.type === "reasoning" || payload.type === "compaction")) return true;
-  if (payload.type === "reasoning" || payload.type === "compaction") return true;
-  return false;
-}
-
-function repairEncryptedContentCommand(args) {
-  const codexHome = expandHome(args.codexHome || "~/.codex");
-  const stateDb = expandHome(args.stateDb || path.join(codexHome, "state_5.sqlite"));
-  if (!fs.existsSync(stateDb)) throw new Error(`Codex state database not found: ${stateDb}`);
-
-  const threadId = args.thread || latestThreadId(stateDb);
-  if (!threadId) throw new Error("No non-archived Codex thread found.");
-  const rolloutPath = threadRolloutPath(stateDb, threadId);
-  if (!rolloutPath) throw new Error(`Thread has no rollout path: ${threadId}`);
-  if (!fs.existsSync(rolloutPath)) throw new Error(`Rollout file not found: ${rolloutPath}`);
-
-  const stamp = new Date().toISOString().replace(/[-:.TZ]/g, "").slice(0, 14);
-  const repair = repairEncryptedContentInRollout(rolloutPath, stamp);
-  console.log(`Thread: ${threadId}`);
-  console.log(`Rollout: ${rolloutPath}`);
-  if (!repair.changed) {
-    console.log("No encrypted_content entries needed repair.");
-    return;
-  }
-  console.log(`Removed encrypted_content from ${repair.cleanedLines} line(s).`);
-  console.log(`Dropped ${repair.droppedLines} hidden reasoning/compaction line(s).`);
-  console.log(`Backup: ${repair.backupPath}`);
-}
-
-function repairEncryptedContentInRollout(rolloutPath, stamp) {
-  let cleanedLines = 0;
-  let droppedLines = 0;
-  const changed = rewriteRolloutJsonLines(
-    rolloutPath,
-    (line) => {
-      if (!line.trim() || !line.includes("encrypted_content")) return line;
-      let entry;
-      try {
-        entry = JSON.parse(line);
-      } catch {
-        return line;
-      }
-      if (!hasEncryptedContent(entry)) return line;
-      if (shouldDropEncryptedRolloutEntry(entry)) {
-        droppedLines += 1;
-        return "";
-      }
-      cleanedLines += 1;
-      return JSON.stringify(removeEncryptedContent(entry));
-    },
-    stamp,
-  );
-  return {
-    changed,
-    cleanedLines,
-    droppedLines,
-    backupPath: changed ? `${rolloutPath}.api-switch-${stamp}.bak` : "",
-  };
-}
-
-function repairEncryptedContentForAccountMode(codexHome, stamp) {
-  const stateDb = path.join(codexHome, "state_5.sqlite");
-  if (!fs.existsSync(stateDb)) return null;
-  const rolloutPaths = Array.from(new Set(
-    sqlite(
-      stateDb,
-      "select rollout_path from threads where archived = 0 and coalesce(rollout_path, '') != '';",
-    )
-      .split("\n")
-      .map((line) => line.trim())
-      .filter(Boolean),
-  ));
-
-  let filesChanged = 0;
-  let cleanedLines = 0;
-  let droppedLines = 0;
-  const backups = [];
-  for (const rolloutPath of rolloutPaths) {
-    if (!fs.existsSync(rolloutPath)) continue;
-    const repair = repairEncryptedContentInRollout(rolloutPath, stamp);
-    if (!repair.changed) continue;
-    filesChanged += 1;
-    cleanedLines += repair.cleanedLines;
-    droppedLines += repair.droppedLines;
-    backups.push(repair.backupPath);
-  }
-
-  if (!filesChanged) return null;
-  return { filesChanged, cleanedLines, droppedLines, backups };
-}
-
 function clearDefaultProfile(codexHome) {
   const configPath = path.join(codexHome, "config.toml");
   if (!fs.existsSync(configPath)) return;
@@ -1677,7 +1475,6 @@ function switchCodexToProxyMode(codexHome, profile, proxyBaseUrl, options = {}) 
 function switchCodexToAccountMode(codexHome, options = {}) {
   const snapshot = snapshotCodexSwitchFiles(codexHome);
   try {
-    const stamp = new Date().toISOString().replace(/[-:.TZ]/g, "").slice(0, 14);
     const wasProxyMode = Boolean(currentOpenaiBaseUrl(codexHome));
     cleanupLegacyManagedBlocks(codexHome);
     clearDefaultProfile(codexHome);
@@ -1693,8 +1490,7 @@ function switchCodexToAccountMode(codexHome, options = {}) {
     proxyState.clients.codex.targetProfile = "";
     writeProxySettings(codexHome, proxyState);
     const migration = options.noMigrateHistory ? null : migrateThreads(codexHome, "openai");
-    const encryptedRepair = options.noMigrateHistory ? null : repairEncryptedContentForAccountMode(codexHome, stamp);
-    return { migration, proxyState, encryptedRepair };
+    return { migration, proxyState };
   } catch (error) {
     restoreCodexSwitchFiles(codexHome, snapshot);
     throw error;
@@ -2036,15 +1832,6 @@ function proxyDiagnostics(codexHome, proxyBaseUrl) {
     }
   }
   add("target-key", "Proxy upstream API key is available", keyOk, keyOk ? "Key file or environment variable is available." : "Missing key file or environment variable.");
-  if (profile) {
-    const codexProtocol = profile.codexUpstreamProtocol || profile.upstreamProtocol || "responses";
-    const validProtocol = ["responses", "chat-completions", "completions"].includes(codexProtocol);
-    const missingFallbacks = (profile.fallbackProfiles || []).filter((name) => !getManagedProfile(codexHome, name));
-    add("target-base-url", "Proxy upstream Base URL is configured", Boolean(profile.baseUrl), profile.baseUrl || "Missing baseUrl.");
-    add("target-model", "Proxy upstream model is configured", Boolean(profile.model), profile.model || "Missing model.");
-    add("target-protocol", "Proxy upstream protocol is valid", validProtocol, codexProtocol || "No protocol set.");
-    add("fallback-profiles", "Fallback profile references exist", missingFallbacks.length === 0, missingFallbacks.length ? `Missing: ${missingFallbacks.join(", ")}` : "All fallback profiles exist.", "warning");
-  }
   add("codex-base-url", "Codex API Base URL points to the local proxy", openaiBaseUrl === proxyBaseUrl, openaiBaseUrl || "No openai_base_url set.");
   add("forced-api", "Codex login method is API for proxy mode", forcedLoginMethod === "api", forcedLoginMethod || "No forced_login_method set.");
   add("proxy-api-key", "Codex API key is the local proxy key", hasProxyAuth, hasProxyAuth ? "Using api-switch as local proxy key." : "auth.json is not using the local proxy key.");
@@ -2224,16 +2011,6 @@ function startProxy(args) {
   const host = args.host || "127.0.0.1";
   const port = Number(args.port || DEFAULT_PORT);
   const codexHome = expandHome(args.codexHome || "~/.codex");
-  const recordProxyRequest = (entry) => {
-    const proxyState = readProxySettings(codexHome);
-    const target = entry.profile || proxyState.clients[entry.client || "codex"]?.targetProfile || "";
-    const managed = target ? getManagedProfile(codexHome, target) : null;
-    const protocol = managed ? (managed.codexUpstreamProtocol || managed.upstreamProtocol || "responses") : "";
-    const record = { ...entry, protocol, at: new Date().toISOString() };
-    updateProxyHealth(proxyState, record);
-    writeProxySettings(codexHome, proxyState);
-    appendProxyRequest(codexHome, record);
-  };
   startProxyServer({
     host,
     port,
@@ -2246,9 +2023,6 @@ function startProxy(args) {
     getFallbackProfiles: (client) => proxyFallbackProfiles(codexHome, client),
     getApiKey: profileApiKey,
     debugDir: apiSwitchDataPath(codexHome),
-    recordRequest: recordProxyRequest,
-    isProfileAvailable: (profileName) => isProxyProfileAvailable(readProxySettings(codexHome), profileName),
-    streamingFirstChunkTimeoutMs: Number(process.env.API_SWITCH_STREAM_FIRST_CHUNK_TIMEOUT_MS || 60000),
   });
 }
 
@@ -2956,6 +2730,7 @@ function htmlPage() {
                   <select id="supportedEndpoint" name="supportedEndpoint">
                     <option value="chat-completions" data-i18n="endpointChatCompletions">/v1/chat/completions · OpenAI compatible</option>
                     <option value="responses" data-i18n="endpointResponses">/v1/responses · Native OpenAI</option>
+                    <option value="responses-compact" data-i18n="endpointResponsesCompact">/v1/responses/compact · Native OpenAI compact</option>
                     <option value="anthropic-messages" data-i18n="endpointAnthropicMessages">/anthropic/v1/messages · Claude compatible</option>
                   </select>
                   <span class="field-help" data-i18n="supportedEndpointHelp">Choose the endpoint your provider supports. For Xiaomi and most OpenAI-compatible relays, use /v1/chat/completions.</span>
@@ -2969,6 +2744,7 @@ function htmlPage() {
                     <option value="responses">Responses</option>
                     <option value="chat-completions">Chat Completions</option>
                     <option value="completions">Completions</option>
+                    <option value="anthropic-messages">Anthropic Messages</option>
                   </select>
                 </label>
                 <label style="display:none"><span data-i18n="claudeProtocolLabel">Claude upstream protocol</span>
@@ -2976,6 +2752,8 @@ function htmlPage() {
                     <option value="" data-i18n="protocolAuto">Auto / native Responses</option>
                     <option value="anthropic-messages">Anthropic Messages</option>
                     <option value="chat-completions">Chat Completions</option>
+                    <option value="responses">Responses</option>
+                    <option value="responses-compact">Responses Compact</option>
                   </select>
                 </label>
                 <label class="full"><span data-i18n="apiKeyLabel">API key</span>
@@ -3057,8 +2835,8 @@ function htmlPage() {
         promoTitle: "Recommended relay: Vayne API",
         promoCopy: "A relay option for using compatible API models with API Switch.",
         promoAction: "View",
-        serviceTitle: "API Switch proxy",
-        serviceCopy: "Use this Base URL in Codex API mode:",
+        serviceTitle: "API Switch background proxy",
+        serviceCopy: "Browser is only for management. Use this Base URL in Codex API mode:",
         proxyStart: "Start",
         proxyStop: "Stop",
         proxyRestart: "Restart",
@@ -3103,6 +2881,7 @@ function htmlPage() {
         supportedEndpointLabel: "Supported endpoint",
         endpointChatCompletions: "/v1/chat/completions · OpenAI compatible",
         endpointResponses: "/v1/responses · Native OpenAI",
+        endpointResponsesCompact: "/v1/responses/compact · Native OpenAI compact",
         endpointAnthropicMessages: "/anthropic/v1/messages · Claude compatible",
         supportedEndpointHelp: "Choose the endpoint your provider supports. For Xiaomi and most OpenAI-compatible relays, use /v1/chat/completions.",
         anthropicBaseUrlLabel: "Anthropic-compatible base URL",
@@ -3161,8 +2940,8 @@ function htmlPage() {
         promoTitle: "推荐中转站：Vayne API",
         promoCopy: "适合配合 API Switch 使用的兼容 API 中转站。",
         promoAction: "查看",
-        serviceTitle: "API Switch 代理",
-        serviceCopy: "Codex API 模式里填写这个 Base URL：",
+        serviceTitle: "API Switch 后台代理",
+        serviceCopy: "浏览器只用于管理。Codex API 模式里填写这个 Base URL：",
         proxyStart: "开启",
         proxyStop: "关闭",
         proxyRestart: "重启",
@@ -3207,6 +2986,7 @@ function htmlPage() {
         supportedEndpointLabel: "支持的接口",
         endpointChatCompletions: "/v1/chat/completions · OpenAI 兼容",
         endpointResponses: "/v1/responses · OpenAI 原生",
+        endpointResponsesCompact: "/v1/responses/compact · OpenAI 原生压缩",
         endpointAnthropicMessages: "/anthropic/v1/messages · Claude 兼容",
         supportedEndpointHelp: "选择服务商实际支持的接口。小米和大多数 OpenAI 兼容中转站选 /v1/chat/completions。",
         anthropicBaseUrlLabel: "兼容 Anthropic 的 Base URL",
@@ -3395,6 +3175,7 @@ function htmlPage() {
       const claudeProtocol = profile.claudeUpstreamProtocol || "";
       let supportedEndpoint = "responses";
       if (claudeProtocol === "anthropic-messages") supportedEndpoint = "anthropic-messages";
+      else if (claudeProtocol === "responses-compact") supportedEndpoint = "responses-compact";
       else if (codexProtocol === "chat-completions" || claudeProtocol === "chat-completions") supportedEndpoint = "chat-completions";
       else if (codexProtocol === "responses") supportedEndpoint = "responses";
       document.querySelector("#supportedEndpoint").value = supportedEndpoint;
@@ -3890,9 +3671,13 @@ function normalizeWebPayload(body) {
     claudeUpstreamProtocol = "";
     anthropicBaseUrl = "";
   } else if (supportedEndpoint === "anthropic-messages") {
-    codexUpstreamProtocol = "";
+    codexUpstreamProtocol = "anthropic-messages";
     claudeUpstreamProtocol = "anthropic-messages";
     anthropicBaseUrl = anthropicBaseUrl || String(body.baseUrl || "").trim();
+  } else if (supportedEndpoint === "responses-compact") {
+    codexUpstreamProtocol = "responses";
+    claudeUpstreamProtocol = "responses-compact";
+    anthropicBaseUrl = "";
   }
   return {
     name,
@@ -3935,7 +3720,6 @@ function readProxySettings(codexHome) {
       codex: { targetProfile: "" },
       "claude-code": { targetProfile: "" },
     },
-    health: {},
   };
   if (!fs.existsSync(settingsPath)) return defaults;
   try {
@@ -3952,43 +3736,10 @@ function readProxySettings(codexHome) {
           targetProfile: typeof clients["claude-code"]?.targetProfile === "string" ? clients["claude-code"].targetProfile : "",
         },
       },
-      health: settings.health && typeof settings.health === "object" ? settings.health : {},
     };
   } catch {
     return defaults;
   }
-}
-
-function updateProxyHealth(proxyState, entry) {
-  const profile = entry && entry.profile;
-  if (!profile) return null;
-  if (!proxyState.health || typeof proxyState.health !== "object") proxyState.health = {};
-  const current = proxyState.health[profile] && typeof proxyState.health[profile] === "object" ? proxyState.health[profile] : {};
-  const nowIso = new Date().toISOString();
-  const failures = entry.ok ? 0 : Number(current.consecutiveFailures || 0) + 1;
-  const next = {
-    ...current,
-    profile,
-    state: failures >= 4 ? "open" : "closed",
-    consecutiveFailures: failures,
-    lastStatus: entry.status,
-    lastError: entry.ok ? "" : String(entry.error || ""),
-    lastErrorCategory: entry.ok ? "" : String(entry.errorCategory || ""),
-    lastUpdatedAt: nowIso,
-  };
-  if (entry.ok) next.lastSuccessAt = nowIso;
-  else next.lastFailureAt = nowIso;
-  if (failures >= 4) next.openUntil = new Date(Date.now() + 60000).toISOString();
-  else delete next.openUntil;
-  proxyState.health[profile] = next;
-  return next;
-}
-
-function isProxyProfileAvailable(proxyState, profileName) {
-  if (!profileName) return true;
-  const health = proxyState.health && proxyState.health[profileName];
-  if (!health || health.state !== "open" || !health.openUntil) return true;
-  return Date.parse(health.openUntil) <= Date.now();
 }
 
 function writeProxySettings(codexHome, settings) {
@@ -4042,10 +3793,12 @@ function startWeb(args) {
   const recordProxyRequest = (entry) => {
     const target = entry.profile || proxyState.clients[entry.client || "codex"]?.targetProfile || "";
     const managed = target ? getManagedProfile(codexHome, target) : null;
-    const protocol = managed ? (managed.codexUpstreamProtocol || managed.upstreamProtocol || "responses") : "";
+    const protocol = managed
+      ? (entry.client === "claude-code"
+        ? (managed.claudeUpstreamProtocol || managed.codexUpstreamProtocol || managed.upstreamProtocol || "responses")
+        : (managed.codexUpstreamProtocol || managed.upstreamProtocol || "responses"))
+      : "";
     const record = { ...entry, protocol, at: new Date().toISOString() };
-    updateProxyHealth(proxyState, record);
-    writeProxySettings(codexHome, proxyState);
     recentProxyRequests.unshift(record);
     recentProxyRequests.splice(50);
     appendProxyRequest(codexHome, record);
@@ -4067,8 +3820,6 @@ function startWeb(args) {
     getApiKey: profileApiKey,
     debugDir: apiSwitchDataPath(codexHome),
     recordRequest: recordProxyRequest,
-    isProfileAvailable: (profileName) => isProxyProfileAvailable(proxyState, profileName),
-    streamingFirstChunkTimeoutMs: Number(process.env.API_SWITCH_STREAM_FIRST_CHUNK_TIMEOUT_MS || 60000),
   });
 
   server = http.createServer(async (req, res) => {
@@ -4110,7 +3861,6 @@ function startWeb(args) {
           activeClaudeProfile: claudeTarget || null,
           activeClaudeModel: claudeProfile ? claudeProfile.model : null,
           clients: proxyState.clients,
-          health: proxyState.health || {},
           recent: recentProxyRequests,
         });
         return;
@@ -4305,7 +4055,6 @@ function startWeb(args) {
         Object.assign(proxyState, result.proxyState || readProxySettings(codexHome));
         proxyState.clients = (result.proxyState || readProxySettings(codexHome)).clients;
         const migration = result.migration;
-        const encryptedRepair = result.encryptedRepair;
         const restart = payload.restartCodex ? tryRestartCodexApp() : null;
         const diagnostics = proxyDiagnostics(codexHome, proxyUrl());
         const details = [
@@ -4315,9 +4064,6 @@ function startWeb(args) {
             : "Threads already use the account provider.",
           "Run: codex",
         ];
-        if (encryptedRepair) {
-          details.splice(2, 0, `Repaired encrypted content in ${encryptedRepair.filesChanged} rollout file(s), removed encrypted_content from ${encryptedRepair.cleanedLines} line(s), and dropped ${encryptedRepair.droppedLines} hidden reasoning/compaction line(s).`);
-        }
         if (restart && !restart.ok) details.push(restart.message);
         if (!diagnostics.ready) {
           const failed = diagnostics.checks.filter((check) => !check.ok && check.level !== "warning").map((check) => check.label).join("; ");
@@ -4393,15 +4139,10 @@ function startWeb(args) {
     if (error && error.code === "EADDRINUSE") {
       const url = `http://${host}:${port}`;
       if (await isApiSwitchRunning(url)) {
-        console.log(`API Switch web UI is already running: ${url}`);
+        console.log(`API Switch management page is already running: ${url}`);
         if (!args.noOpen) openBrowser(url);
-        // In foreground CLI mode this is just a friendly success.  Under a
-        // service manager (LaunchAgent/systemd/Startup wrapper), exiting here
-        // can create a restart loop when a stale foreground instance already
-        // owns the port.  Keep the service process alive so KeepAlive does not
-        // spin, and so a later stop of the stale owner lets the service bind.
         if (process.env.API_SWITCH_SERVICE_MANAGER === "1") {
-          setInterval(() => {}, 60 * 60 * 1000);
+          waitForServiceTakeover(url);
           return;
         }
         process.exit(0);
@@ -4416,7 +4157,7 @@ function startWeb(args) {
   server.listen(port, host, () => {
     const address = server.address();
     const url = `http://${host}:${address.port}`;
-    console.log(`API Switch web UI: ${url}`);
+    console.log(`API Switch management page: ${url}`);
     if (!args.noOpen) {
       openBrowser(url);
     }
@@ -4435,6 +4176,16 @@ async function isApiSwitchRunning(url) {
   } catch {
     return false;
   }
+}
+
+function waitForServiceTakeover(url) {
+  console.log(`API Switch service is waiting to own ${url}. Stop the foreground web process to let the service take over.`);
+  const timer = setInterval(async () => {
+    if (await isApiSwitchRunning(url)) return;
+    console.log(`API Switch service takeover requested for ${url}.`);
+    clearInterval(timer);
+    process.exit(0);
+  }, 2000);
 }
 
 function openBrowser(url) {
@@ -4523,11 +4274,6 @@ async function main() {
 
   if (args.command === "thread-model") {
     threadModelCommand(args);
-    return;
-  }
-
-  if (args.command === "repair-encrypted-content") {
-    repairEncryptedContentCommand(args);
     return;
   }
 

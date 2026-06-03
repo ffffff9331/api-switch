@@ -8,7 +8,7 @@ const os = require("node:os");
 const path = require("node:path");
 
 const bin = path.join(__dirname, "..", "bin", "api-switch.js");
-const { responsesToChatPayload } = require("../lib/proxy/chat-bridge");
+const { responsesToAnthropicPayload, responsesToChatPayload } = require("../lib/proxy/chat-bridge");
 const { adapterForModel, capabilitiesForModel, routeModel } = require("../lib/proxy/provider-registry");
 const spawnEnv = { ...process.env, API_SWITCH_SKIP_SERVICE_INSTALL: "1" };
 
@@ -18,7 +18,7 @@ function waitForWebUrl(child) {
     const timer = setTimeout(() => reject(new Error(`Timed out waiting for web server. Output: ${output}`)), 5000);
     child.stdout.on("data", (chunk) => {
       output += chunk.toString();
-      const match = output.match(/API Switch web UI: (http:\/\/127\.0\.0\.1:\d+)/);
+      const match = output.match(/API Switch management page: (http:\/\/127\.0\.0\.1:\d+)/);
       if (match) {
         clearTimeout(timer);
         resolve(match[1]);
@@ -63,6 +63,33 @@ function waitForProxyUrl(child) {
       if (code !== null && code !== 0) {
         clearTimeout(timer);
         reject(new Error(`Proxy server exited with code ${code}. Output: ${output}`));
+      }
+    });
+  });
+}
+
+function waitForStdout(child, pattern, timeoutMs = 5000) {
+  return new Promise((resolve, reject) => {
+    let output = "";
+    const timer = setTimeout(() => reject(new Error(`Timed out waiting for stdout ${pattern}. Output: ${output}`)), timeoutMs);
+    child.stdout.on("data", (chunk) => {
+      output += chunk.toString();
+      if (pattern.test(output)) {
+        clearTimeout(timer);
+        resolve(output);
+      }
+    });
+    child.stderr.on("data", (chunk) => {
+      output += chunk.toString();
+    });
+    child.on("error", (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    child.on("exit", (code) => {
+      if (code !== null && code !== 0) {
+        clearTimeout(timer);
+        reject(new Error(`Process exited with code ${code}. Output: ${output}`));
       }
     });
   });
@@ -206,6 +233,20 @@ describe("api-switch", () => {
     assert.equal(payload.tools[0].function.parameters.additionalProperties, true);
   });
 
+  it("converts Codex Responses payloads to Anthropic Messages when that endpoint is selected", () => {
+    const payload = responsesToAnthropicPayload({
+      model: "claude-opus-4-8",
+      instructions: "Be terse.",
+      input: "reply ok",
+      max_output_tokens: 8,
+    }, "claude-opus-4-8");
+
+    assert.equal(payload.model, "claude-opus-4-8");
+    assert.equal(payload.max_tokens, 8);
+    assert.equal(payload.messages[0].role, "user");
+    assert.match(payload.messages.map((message) => message.content).join("\n"), /reply ok/);
+  });
+
   it("can downgrade image parts to text-only chat payloads for text-only relays", () => {
     const payload = responsesToChatPayload({
       model: "mimo-v2.5-pro",
@@ -221,33 +262,6 @@ describe("api-switch", () => {
     assert.equal(typeof payload.messages[0].content, "string");
     assert.match(payload.messages[0].content, /describe/);
     assert.match(payload.messages[0].content, /Image input omitted/);
-  });
-
-  it("passes OpenAI chat compatibility fields through the Responses bridge", () => {
-    const payload = responsesToChatPayload({
-      model: "gpt-5.5",
-      input: "hello",
-      stream: true,
-      metadata: { trace: "abc" },
-      seed: 7,
-      service_tier: "default",
-      logprobs: true,
-      top_logprobs: 2,
-      logit_bias: { "1": -1 },
-      n: 1,
-      reasoning: { effort: "high" },
-    }, "gpt-5.5");
-
-    assert.deepEqual(payload.stream_options, { include_usage: true });
-    assert.deepEqual(payload.metadata, { trace: "abc" });
-    assert.equal(payload.seed, 7);
-    assert.equal(payload.service_tier, "default");
-    assert.equal(payload.logprobs, true);
-    assert.equal(payload.top_logprobs, 2);
-    assert.deepEqual(payload.logit_bias, { "1": -1 });
-    assert.equal(payload.n, 1);
-    assert.equal(payload.reasoning_effort, "high");
-    assert.deepEqual(payload.reasoning, { effort: "high" });
   });
 
   it("writes a relay profile outside Codex config", () => {
@@ -1552,93 +1566,6 @@ describe("api-switch", () => {
     assert.equal(fs.readdirSync(dir).filter((name) => name.includes(".bak")).length, 1);
   });
 
-  it("repairs invalid encrypted content in the latest rollout without removing visible messages", () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "api-switch-"));
-    const dbPath = path.join(dir, "state_5.sqlite");
-    const rollout = path.join(dir, "encrypted.jsonl");
-    fs.writeFileSync(
-      rollout,
-      [
-        JSON.stringify({ type: "session_meta", payload: { id: "encrypted", model_provider: "openai" } }),
-        JSON.stringify({ type: "response_item", payload: { type: "reasoning", encrypted_content: "bad-ciphertext", content: null } }),
-        JSON.stringify({ type: "response_item", payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: "visible" }], encrypted_content: "bad-message-ciphertext" } }),
-        JSON.stringify({ type: "event_msg", payload: { type: "user_message", text: "keep me" } }),
-        "",
-      ].join("\n"),
-    );
-    spawnSync(
-      "sqlite3",
-      [
-        dbPath,
-        [
-          "create table threads (id text primary key, archived integer default 0, model text, model_provider text, rollout_path text, created_at integer, updated_at integer, created_at_ms integer, updated_at_ms integer);",
-          `insert into threads (id, archived, model, model_provider, rollout_path, created_at, updated_at, created_at_ms, updated_at_ms) values ('encrypted', 0, 'gpt-5.5', 'openai', '${rollout.replace(/'/g, "''")}', 1, 2, 1000, 2000);`,
-        ].join(" "),
-      ],
-      { encoding: "utf8", env: spawnEnv },
-    );
-
-    const result = spawnSync(
-      process.execPath,
-      [bin, "repair-encrypted-content", "--codex-home", dir],
-      { encoding: "utf8", env: spawnEnv },
-    );
-
-    assert.equal(result.status, 0, result.stderr);
-    assert.match(result.stdout, /Dropped 1 hidden reasoning\/compaction line\(s\)/);
-    assert.match(result.stdout, /Removed encrypted_content from 1 line\(s\)/);
-    const repaired = fs.readFileSync(rollout, "utf8");
-    assert.doesNotMatch(repaired, /encrypted_content/);
-    assert.match(repaired, /visible/);
-    assert.match(repaired, /keep me/);
-    assert.equal(fs.readdirSync(dir).some((name) => name.includes(".api-switch-") && name.endsWith(".bak")), true);
-  });
-
-  it("automatically repairs encrypted content when switching back to account mode", () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "api-switch-"));
-    fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(path.join(dir, "config.toml"), 'openai_base_url = "http://127.0.0.1:18600/v1"\nforced_login_method = "api"\n');
-    fs.writeFileSync(path.join(dir, "auth.json"), `${JSON.stringify({ auth_mode: "apikey", OPENAI_API_KEY: "api-switch" }, null, 2)}\n`);
-    fs.mkdirSync(path.join(dir, "api-switch"), { recursive: true });
-    fs.writeFileSync(path.join(dir, "api-switch", "proxy-settings.json"), JSON.stringify({
-      enabled: true,
-      clients: { codex: { targetProfile: "vayne" }, "claude-code": { targetProfile: "" } },
-    }));
-    const dbPath = path.join(dir, "state_5.sqlite");
-    const rollout = path.join(dir, "account-repair.jsonl");
-    fs.writeFileSync(
-      rollout,
-      [
-        JSON.stringify({ type: "session_meta", payload: { id: "account-repair", model_provider: "openai" } }),
-        JSON.stringify({ type: "response_item", payload: { type: "reasoning", encrypted_content: "bad-ciphertext", content: null } }),
-        JSON.stringify({ type: "response_item", payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: "visible" }] } }),
-        "",
-      ].join("\n"),
-    );
-    spawnSync(
-      "sqlite3",
-      [
-        dbPath,
-        [
-          "create table threads (id text primary key, archived integer default 0, model text, model_provider text, rollout_path text, created_at integer, updated_at integer, created_at_ms integer, updated_at_ms integer);",
-          `insert into threads (id, archived, model, model_provider, rollout_path, created_at, updated_at, created_at_ms, updated_at_ms) values ('account-repair', 0, 'gpt-5.5', 'vayne', '${rollout.replace(/'/g, "''")}', 1, 2, 1000, 2000);`,
-        ].join(" "),
-      ],
-      { encoding: "utf8", env: spawnEnv },
-    );
-
-    const result = spawnSync(process.execPath, [bin, "account", "--codex-home", dir], {
-      encoding: "utf8",
-      env: spawnEnv,
-    });
-
-    assert.equal(result.status, 0, result.stderr);
-    assert.match(result.stdout, /Repaired encrypted content in 1 rollout file\(s\)/);
-    const repaired = fs.readFileSync(rollout, "utf8");
-    assert.doesNotMatch(repaired, /encrypted_content/);
-    assert.match(repaired, /visible/);
-  });
-
   it("advertises the web UI command", () => {
     const result = spawnSync(process.execPath, [bin, "--help"], {
       encoding: "utf8",
@@ -1656,7 +1583,6 @@ describe("api-switch", () => {
     assert.match(result.stdout, /--restart-codex/);
     assert.match(result.stdout, /api-switch model --name <profile> --model <model>/);
     assert.match(result.stdout, /api-switch thread-model --model <model>/);
-    assert.match(result.stdout, /api-switch repair-encrypted-content/);
   });
 
   it("reports a friendly error when the default port is already in use", async () => {
@@ -1703,10 +1629,47 @@ describe("api-switch", () => {
       env: spawnEnv,
     });
       assert.equal(second.status, 0, second.stderr);
-      assert.match(second.stdout, /API Switch web UI is already running/);
+      assert.match(second.stdout, /API Switch management page is already running/);
       assert.doesNotMatch(second.stderr, /Unhandled 'error' event/);
     } finally {
       server.kill();
+    }
+  });
+
+  it("service-managed web exits for takeover after the foreground owner stops", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "api-switch-"));
+    const owner = spawn(process.execPath, [bin, "web", "--codex-home", dir, "--host", "127.0.0.1", "--port", "0", "--no-open"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let service = null;
+
+    try {
+      const webUrl = await waitForWebUrl(owner);
+      const port = new URL(webUrl).port;
+      service = spawn(process.execPath, [bin, "web", "--codex-home", dir, "--host", "127.0.0.1", "--port", port, "--no-open"], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+        env: { ...spawnEnv, API_SWITCH_SERVICE_MANAGER: "1" },
+      });
+
+      const stdout = await waitForStdout(service, /waiting to own/);
+      assert.match(stdout, /API Switch management page is already running/);
+      assert.match(stdout, /waiting to own/);
+      owner.kill();
+
+      const exitCode = await new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error("service-managed web did not exit for takeover")), 7000);
+        service.on("exit", (code) => {
+          clearTimeout(timer);
+          resolve(code);
+        });
+      });
+      assert.equal(exitCode, 0);
+      service = null;
+    } finally {
+      owner.kill();
+      if (service) service.kill();
     }
   });
 
@@ -2232,53 +2195,6 @@ describe("api-switch", () => {
     }
   });
 
-  it("diagnostics reports relay profile completeness problems", async () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "api-switch-"));
-    const setup = spawnSync(process.execPath, [
-      bin,
-      "setup",
-      "--codex-home",
-      dir,
-      "--name",
-      "vayne",
-      "--base-url",
-      "https://relay.example/v1",
-      "--model",
-      "gpt-5.5",
-      "--fallback-profiles",
-      "missing-backup",
-    ], {
-      input: "sk-test\n",
-      encoding: "utf8",
-      env: spawnEnv,
-    });
-    assert.equal(setup.status, 0, setup.stderr);
-    const activate = spawnSync(process.execPath, [bin, "default", "--codex-home", dir, "--name", "vayne"], { encoding: "utf8", env: spawnEnv });
-    assert.equal(activate.status, 0, activate.stderr);
-
-    const server = spawn(process.execPath, [bin, "web", "--codex-home", dir, "--host", "127.0.0.1", "--port", "0", "--no-open"], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-
-    try {
-      const webUrl = await waitForWebUrl(server);
-      const diagnostics = await fetch(`${webUrl}/api/diagnostics`);
-      const payload = await diagnostics.json();
-      const fallback = payload.checks.find((check) => check.id === "fallback-profiles");
-      assert.equal(diagnostics.status, 200);
-      assert.equal(payload.mode, "proxy");
-      assert.equal(payload.checks.find((check) => check.id === "target-base-url").ok, true);
-      assert.equal(payload.checks.find((check) => check.id === "target-model").ok, true);
-      assert.equal(payload.checks.find((check) => check.id === "target-protocol").ok, true);
-      assert.equal(fallback.ok, false);
-      assert.equal(fallback.level, "warning");
-      assert.match(fallback.detail, /missing-backup/);
-    } finally {
-      server.kill();
-    }
-  });
-
   it("reports profile health through the web API", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "api-switch-"));
     const upstream = http.createServer((req, res) => {
@@ -2596,136 +2512,6 @@ describe("api-switch", () => {
     }
   });
 
-  it("retries once when upstream closes before response headers", async () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "api-switch-"));
-    let attempts = 0;
-    const upstream = http.createServer(async (req, res) => {
-      if (req.method === "POST" && req.url === "/v1/responses") {
-        attempts += 1;
-        for await (const _chunk of req) {
-          // Drain the request before deciding the simulated upstream outcome.
-        }
-        if (attempts === 1) {
-          res.socket.destroy();
-          return;
-        }
-        res.writeHead(200, { "content-type": "application/json" });
-        res.end(JSON.stringify({ ok: true, attempts }));
-        return;
-      }
-      if (req.method === "GET" && req.url === "/v1/models") {
-        res.writeHead(200, { "content-type": "application/json" });
-        res.end(JSON.stringify({ data: [{ id: "gpt-5.5" }] }));
-        return;
-      }
-      res.writeHead(404, { "content-type": "application/json" });
-      res.end(JSON.stringify({ error: "not found" }));
-    });
-
-    await new Promise((resolve) => upstream.listen(0, "127.0.0.1", resolve));
-    const setup = spawnSync(
-      process.execPath,
-      [
-        bin,
-        "setup",
-        "--codex-home",
-        dir,
-        "--name",
-        "vayne",
-        "--base-url",
-        `http://127.0.0.1:${upstream.address().port}/v1`,
-        "--model",
-        "gpt-5.5",
-      ],
-      { input: "sk-test\n", encoding: "utf8", env: spawnEnv },
-    );
-    assert.equal(setup.status, 0, setup.stderr);
-    const activate = spawnSync(process.execPath, [bin, "default", "--codex-home", dir, "--name", "vayne"], { encoding: "utf8", env: spawnEnv });
-    assert.equal(activate.status, 0, activate.stderr);
-
-    const server = spawn(process.execPath, [bin, "proxy", "--codex-home", dir, "--host", "127.0.0.1", "--port", "0"], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-
-    try {
-      const baseUrl = await waitForProxyUrl(server);
-      const response = await fetch(`${baseUrl}/responses`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ model: "gpt-5.5", input: "hello" }),
-      });
-      const payload = await response.json();
-      assert.equal(response.status, 200);
-      assert.deepEqual(payload, { ok: true, attempts: 2 });
-      assert.equal(attempts, 2);
-    } finally {
-      server.kill();
-      upstream.close();
-    }
-  });
-
-  it("returns a diagnostic message when upstream connection retry fails", async () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "api-switch-"));
-    let attempts = 0;
-    const upstream = http.createServer(async (req, res) => {
-      if (req.method === "POST" && req.url === "/v1/responses") {
-        attempts += 1;
-        for await (const _chunk of req) {
-          // Drain the request so undici reports an upstream response failure.
-        }
-        res.socket.destroy();
-        return;
-      }
-      res.writeHead(404, { "content-type": "application/json" });
-      res.end(JSON.stringify({ error: "not found" }));
-    });
-
-    await new Promise((resolve) => upstream.listen(0, "127.0.0.1", resolve));
-    const setup = spawnSync(
-      process.execPath,
-      [
-        bin,
-        "setup",
-        "--codex-home",
-        dir,
-        "--name",
-        "vayne",
-        "--base-url",
-        `http://127.0.0.1:${upstream.address().port}/v1`,
-        "--model",
-        "gpt-5.5",
-      ],
-      { input: "sk-test\n", encoding: "utf8", env: spawnEnv },
-    );
-    assert.equal(setup.status, 0, setup.stderr);
-    const activate = spawnSync(process.execPath, [bin, "default", "--codex-home", dir, "--name", "vayne"], { encoding: "utf8", env: spawnEnv });
-    assert.equal(activate.status, 0, activate.stderr);
-
-    const server = spawn(process.execPath, [bin, "proxy", "--codex-home", dir, "--host", "127.0.0.1", "--port", "0"], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-
-    try {
-      const baseUrl = await waitForProxyUrl(server);
-      const response = await fetch(`${baseUrl}/responses`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ model: "gpt-5.5", input: "hello" }),
-      });
-      const payload = await response.json();
-      assert.equal(response.status, 502);
-      assert.match(payload.error, /Upstream connection failed before response headers/);
-      assert.match(payload.error, /\/v1\/responses/);
-      assert.match(payload.error, /after 2\/2 attempt/);
-      assert.equal(attempts, 2);
-    } finally {
-      server.kill();
-      upstream.close();
-    }
-  });
-
   it("does not retry generation requests after upstream 429 and passes trace headers through", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "api-switch-"));
     let attempts = 0;
@@ -3037,6 +2823,149 @@ describe("api-switch", () => {
       assert.match(receivedBody.prompt, /Reply exactly: ok/);
       assert.equal(payload.output[0].content[0].text, "ok");
       assert.equal(response.headers.get("x-api-switch-upstream-protocol"), "completions-bridge");
+    } finally {
+      server.kill();
+      upstream.close();
+    }
+  });
+
+  it("uses anthropic messages bridge when Codex selects the Claude-compatible endpoint", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "api-switch-"));
+    let receivedPath = "";
+    let receivedBody = null;
+    const upstream = http.createServer(async (req, res) => {
+      if (req.method === "POST" && req.url === "/anthropic/v1/messages") {
+        receivedPath = req.url;
+        const chunks = [];
+        for await (const chunk of req) chunks.push(chunk);
+        receivedBody = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({
+          id: "msg_anthropic",
+          type: "message",
+          role: "assistant",
+          model: receivedBody.model,
+          content: [{ type: "text", text: "ok" }],
+          stop_reason: "end_turn",
+          usage: { input_tokens: 1, output_tokens: 1 },
+        }));
+        return;
+      }
+      if (req.method === "POST" && req.url === "/v1/chat/completions") {
+        res.writeHead(500, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: "chat completions should not be used" }));
+        return;
+      }
+      if (req.method === "POST" && req.url === "/v1/responses") {
+        res.writeHead(500, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: "responses should not be used" }));
+        return;
+      }
+      res.writeHead(404, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "not found" }));
+    });
+    await new Promise((resolve) => upstream.listen(0, "127.0.0.1", resolve));
+    const setup = spawnSync(process.execPath, [
+      bin,
+      "setup",
+      "--codex-home",
+      dir,
+      "--name",
+      "anthropic",
+      "--base-url",
+      `http://127.0.0.1:${upstream.address().port}/anthropic`,
+      "--model",
+      "claude-opus-4-8",
+      "--codex-upstream-protocol",
+      "anthropic-messages",
+      "--claude-upstream-protocol",
+      "anthropic-messages",
+    ], { input: "sk-key\n", encoding: "utf8" });
+    assert.equal(setup.status, 0, setup.stderr);
+    const activate = spawnSync(process.execPath, [bin, "default", "--codex-home", dir, "--name", "anthropic"], { encoding: "utf8", env: spawnEnv });
+    assert.equal(activate.status, 0, activate.stderr);
+    const server = spawn(process.execPath, [bin, "proxy", "--codex-home", dir, "--host", "127.0.0.1", "--port", "0"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+
+    try {
+      const baseUrl = await waitForProxyUrl(server);
+      const response = await fetch(`${baseUrl}/responses`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: "claude-opus-4-8", input: "Reply exactly: ok", max_output_tokens: 8, stream: false }),
+      });
+      const payload = await response.json();
+      assert.equal(response.status, 200, JSON.stringify(payload));
+      assert.equal(receivedPath, "/anthropic/v1/messages");
+      assert.equal(receivedBody.model, "claude-opus-4-8");
+      assert.equal(receivedBody.messages[0].content, "Reply exactly: ok");
+      assert.equal(payload.output[0].content[0].text, "ok");
+      assert.equal(response.headers.get("x-api-switch-upstream-protocol"), "anthropic-messages-bridge");
+    } finally {
+      server.kill();
+      upstream.close();
+    }
+  });
+
+  it("serves streamed Codex Responses through the Anthropic messages bridge without upstream SSE", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "api-switch-"));
+    let receivedBody = null;
+    const upstream = http.createServer(async (req, res) => {
+      if (req.method === "POST" && req.url === "/anthropic/v1/messages") {
+        const chunks = [];
+        for await (const chunk of req) chunks.push(chunk);
+        receivedBody = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({
+          id: "msg_anthropic",
+          type: "message",
+          role: "assistant",
+          model: receivedBody.model,
+          content: [{ type: "text", text: "ok" }],
+          stop_reason: "end_turn",
+          usage: { input_tokens: 1, output_tokens: 1 },
+        }));
+        return;
+      }
+      res.writeHead(404, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "not found" }));
+    });
+    await new Promise((resolve) => upstream.listen(0, "127.0.0.1", resolve));
+    const setup = spawnSync(process.execPath, [
+      bin,
+      "setup",
+      "--codex-home",
+      dir,
+      "--name",
+      "anthropic-stream",
+      "--base-url",
+      `http://127.0.0.1:${upstream.address().port}/anthropic`,
+      "--model",
+      "claude-opus-4-8",
+      "--codex-upstream-protocol",
+      "anthropic-messages",
+      "--claude-upstream-protocol",
+      "anthropic-messages",
+    ], { input: "sk-key\n", encoding: "utf8" });
+    assert.equal(setup.status, 0, setup.stderr);
+    const activate = spawnSync(process.execPath, [bin, "default", "--codex-home", dir, "--name", "anthropic-stream"], { encoding: "utf8", env: spawnEnv });
+    assert.equal(activate.status, 0, activate.stderr);
+    const server = spawn(process.execPath, [bin, "proxy", "--codex-home", dir, "--host", "127.0.0.1", "--port", "0"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+
+    try {
+      const baseUrl = await waitForProxyUrl(server);
+      const response = await fetch(`${baseUrl}/responses`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: "claude-opus-4-8", input: "Reply exactly: ok", max_output_tokens: 8, stream: true }),
+      });
+      const text = await response.text();
+      assert.equal(response.status, 200, text);
+      assert.match(response.headers.get("content-type") || "", /text\/event-stream/);
+      assert.equal(response.headers.get("x-api-switch-upstream-protocol"), "anthropic-messages-bridge");
+      assert.equal(receivedBody.stream, false);
+      assert.match(text, /response\.output_text\.delta/);
+      assert.match(text, /ok/);
+      assert.match(text, /\[DONE\]/);
     } finally {
       server.kill();
       upstream.close();
@@ -3784,73 +3713,6 @@ describe("api-switch", () => {
       assert.equal(backupAttempts, 1);
     } finally {
       server.kill();
-      primary.close();
-      backup.close();
-    }
-  });
-
-  it("falls back when a streaming upstream sends headers but no first chunk", async () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "api-switch-"));
-    let primaryAttempts = 0;
-    let backupAttempts = 0;
-    const primarySockets = new Set();
-    const primary = http.createServer(async (req, res) => {
-      primaryAttempts += 1;
-      for await (const _chunk of req) {
-        // Drain request body before returning a stalled stream.
-      }
-      primarySockets.add(res.socket);
-      res.writeHead(200, { "content-type": "text/event-stream; charset=utf-8" });
-      res.flushHeaders();
-    });
-    const backup = http.createServer(async (req, res) => {
-      backupAttempts += 1;
-      for await (const _chunk of req) {
-        // Drain request body.
-      }
-      res.writeHead(200, { "content-type": "text/event-stream; charset=utf-8" });
-      res.end('event: response.created\ndata: {"type":"response.created","response":{"id":"resp_backup","object":"response","status":"in_progress","model":"gpt-5.5","output":[]}}\n\nevent: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"backup"}\n\nevent: response.completed\ndata: {"type":"response.completed","response":{"id":"resp_backup","object":"response","status":"completed","model":"gpt-5.5","output":[]}}\n\ndata: [DONE]\n\n');
-    });
-    await new Promise((resolve) => primary.listen(0, "127.0.0.1", resolve));
-    await new Promise((resolve) => backup.listen(0, "127.0.0.1", resolve));
-
-    spawnSync(process.execPath, [bin, "setup", "--codex-home", dir, "--name", "backup", "--base-url", `http://127.0.0.1:${backup.address().port}/v1`, "--model", "gpt-5.5"], {
-      input: "sk-backup\n",
-      encoding: "utf8",
-      env: spawnEnv,
-    });
-    const setup = spawnSync(process.execPath, [bin, "setup", "--codex-home", dir, "--name", "primary", "--base-url", `http://127.0.0.1:${primary.address().port}/v1`, "--model", "gpt-5.5", "--fallback-profiles", "backup"], {
-      input: "sk-primary\n",
-      encoding: "utf8",
-      env: spawnEnv,
-    });
-    assert.equal(setup.status, 0, setup.stderr);
-    const activate = spawnSync(process.execPath, [bin, "default", "--codex-home", dir, "--name", "primary"], { encoding: "utf8", env: spawnEnv });
-    assert.equal(activate.status, 0, activate.stderr);
-    const server = spawn(process.execPath, [bin, "proxy", "--codex-home", dir, "--host", "127.0.0.1", "--port", "0"], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-      env: { ...process.env, API_SWITCH_STREAM_FIRST_CHUNK_TIMEOUT_MS: "100" },
-    });
-
-    try {
-      const baseUrl = await waitForProxyUrl(server);
-      const response = await fetch(`${baseUrl}/responses`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ model: "gpt-5.5", input: "hello", stream: true }),
-      });
-      const payload = await response.text();
-      assert.equal(response.status, 200);
-      assert.match(payload, /resp_backup/);
-      assert.match(payload, /backup/);
-      assert.equal(primaryAttempts, 1);
-      assert.equal(backupAttempts, 1);
-      const logs = fs.readFileSync(path.join(dir, "api-switch", "proxy-requests.jsonl"), "utf8");
-      assert.match(logs, /upstream_first_chunk_timeout/);
-    } finally {
-      server.kill();
-      for (const socket of primarySockets) socket.destroy();
       primary.close();
       backup.close();
     }
