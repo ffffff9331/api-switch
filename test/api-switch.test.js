@@ -8,7 +8,7 @@ const os = require("node:os");
 const path = require("node:path");
 
 const bin = path.join(__dirname, "..", "bin", "api-switch.js");
-const { responsesToChatPayload } = require("../lib/proxy/chat-bridge");
+const { responsesToAnthropicPayload, responsesToChatPayload } = require("../lib/proxy/chat-bridge");
 const { adapterForModel, capabilitiesForModel, routeModel } = require("../lib/proxy/provider-registry");
 const spawnEnv = { ...process.env, API_SWITCH_SKIP_SERVICE_INSTALL: "1" };
 
@@ -18,7 +18,7 @@ function waitForWebUrl(child) {
     const timer = setTimeout(() => reject(new Error(`Timed out waiting for web server. Output: ${output}`)), 5000);
     child.stdout.on("data", (chunk) => {
       output += chunk.toString();
-      const match = output.match(/API Switch web UI: (http:\/\/127\.0\.0\.1:\d+)/);
+      const match = output.match(/API Switch management page: (http:\/\/127\.0\.0\.1:\d+)/);
       if (match) {
         clearTimeout(timer);
         resolve(match[1]);
@@ -63,6 +63,33 @@ function waitForProxyUrl(child) {
       if (code !== null && code !== 0) {
         clearTimeout(timer);
         reject(new Error(`Proxy server exited with code ${code}. Output: ${output}`));
+      }
+    });
+  });
+}
+
+function waitForStdout(child, pattern, timeoutMs = 5000) {
+  return new Promise((resolve, reject) => {
+    let output = "";
+    const timer = setTimeout(() => reject(new Error(`Timed out waiting for stdout ${pattern}. Output: ${output}`)), timeoutMs);
+    child.stdout.on("data", (chunk) => {
+      output += chunk.toString();
+      if (pattern.test(output)) {
+        clearTimeout(timer);
+        resolve(output);
+      }
+    });
+    child.stderr.on("data", (chunk) => {
+      output += chunk.toString();
+    });
+    child.on("error", (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    child.on("exit", (code) => {
+      if (code !== null && code !== 0) {
+        clearTimeout(timer);
+        reject(new Error(`Process exited with code ${code}. Output: ${output}`));
       }
     });
   });
@@ -204,6 +231,20 @@ describe("api-switch", () => {
     assert.equal(payload.tools[0].type, "function");
     assert.equal(payload.tools[0].function.name, "local_shell");
     assert.equal(payload.tools[0].function.parameters.additionalProperties, true);
+  });
+
+  it("converts Codex Responses payloads to Anthropic Messages when that endpoint is selected", () => {
+    const payload = responsesToAnthropicPayload({
+      model: "claude-opus-4-8",
+      instructions: "Be terse.",
+      input: "reply ok",
+      max_output_tokens: 8,
+    }, "claude-opus-4-8");
+
+    assert.equal(payload.model, "claude-opus-4-8");
+    assert.equal(payload.max_tokens, 8);
+    assert.equal(payload.messages[0].role, "user");
+    assert.match(payload.messages.map((message) => message.content).join("\n"), /reply ok/);
   });
 
   it("can downgrade image parts to text-only chat payloads for text-only relays", () => {
@@ -1588,10 +1629,47 @@ describe("api-switch", () => {
       env: spawnEnv,
     });
       assert.equal(second.status, 0, second.stderr);
-      assert.match(second.stdout, /API Switch web UI is already running/);
+      assert.match(second.stdout, /API Switch management page is already running/);
       assert.doesNotMatch(second.stderr, /Unhandled 'error' event/);
     } finally {
       server.kill();
+    }
+  });
+
+  it("service-managed web exits for takeover after the foreground owner stops", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "api-switch-"));
+    const owner = spawn(process.execPath, [bin, "web", "--codex-home", dir, "--host", "127.0.0.1", "--port", "0", "--no-open"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let service = null;
+
+    try {
+      const webUrl = await waitForWebUrl(owner);
+      const port = new URL(webUrl).port;
+      service = spawn(process.execPath, [bin, "web", "--codex-home", dir, "--host", "127.0.0.1", "--port", port, "--no-open"], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+        env: { ...spawnEnv, API_SWITCH_SERVICE_MANAGER: "1" },
+      });
+
+      const stdout = await waitForStdout(service, /waiting to own/);
+      assert.match(stdout, /API Switch management page is already running/);
+      assert.match(stdout, /waiting to own/);
+      owner.kill();
+
+      const exitCode = await new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error("service-managed web did not exit for takeover")), 7000);
+        service.on("exit", (code) => {
+          clearTimeout(timer);
+          resolve(code);
+        });
+      });
+      assert.equal(exitCode, 0);
+      service = null;
+    } finally {
+      owner.kill();
+      if (service) service.kill();
     }
   });
 
@@ -2745,6 +2823,149 @@ describe("api-switch", () => {
       assert.match(receivedBody.prompt, /Reply exactly: ok/);
       assert.equal(payload.output[0].content[0].text, "ok");
       assert.equal(response.headers.get("x-api-switch-upstream-protocol"), "completions-bridge");
+    } finally {
+      server.kill();
+      upstream.close();
+    }
+  });
+
+  it("uses anthropic messages bridge when Codex selects the Claude-compatible endpoint", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "api-switch-"));
+    let receivedPath = "";
+    let receivedBody = null;
+    const upstream = http.createServer(async (req, res) => {
+      if (req.method === "POST" && req.url === "/anthropic/v1/messages") {
+        receivedPath = req.url;
+        const chunks = [];
+        for await (const chunk of req) chunks.push(chunk);
+        receivedBody = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({
+          id: "msg_anthropic",
+          type: "message",
+          role: "assistant",
+          model: receivedBody.model,
+          content: [{ type: "text", text: "ok" }],
+          stop_reason: "end_turn",
+          usage: { input_tokens: 1, output_tokens: 1 },
+        }));
+        return;
+      }
+      if (req.method === "POST" && req.url === "/v1/chat/completions") {
+        res.writeHead(500, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: "chat completions should not be used" }));
+        return;
+      }
+      if (req.method === "POST" && req.url === "/v1/responses") {
+        res.writeHead(500, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: "responses should not be used" }));
+        return;
+      }
+      res.writeHead(404, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "not found" }));
+    });
+    await new Promise((resolve) => upstream.listen(0, "127.0.0.1", resolve));
+    const setup = spawnSync(process.execPath, [
+      bin,
+      "setup",
+      "--codex-home",
+      dir,
+      "--name",
+      "anthropic",
+      "--base-url",
+      `http://127.0.0.1:${upstream.address().port}/anthropic`,
+      "--model",
+      "claude-opus-4-8",
+      "--codex-upstream-protocol",
+      "anthropic-messages",
+      "--claude-upstream-protocol",
+      "anthropic-messages",
+    ], { input: "sk-key\n", encoding: "utf8" });
+    assert.equal(setup.status, 0, setup.stderr);
+    const activate = spawnSync(process.execPath, [bin, "default", "--codex-home", dir, "--name", "anthropic"], { encoding: "utf8", env: spawnEnv });
+    assert.equal(activate.status, 0, activate.stderr);
+    const server = spawn(process.execPath, [bin, "proxy", "--codex-home", dir, "--host", "127.0.0.1", "--port", "0"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+
+    try {
+      const baseUrl = await waitForProxyUrl(server);
+      const response = await fetch(`${baseUrl}/responses`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: "claude-opus-4-8", input: "Reply exactly: ok", max_output_tokens: 8, stream: false }),
+      });
+      const payload = await response.json();
+      assert.equal(response.status, 200, JSON.stringify(payload));
+      assert.equal(receivedPath, "/anthropic/v1/messages");
+      assert.equal(receivedBody.model, "claude-opus-4-8");
+      assert.equal(receivedBody.messages[0].content, "Reply exactly: ok");
+      assert.equal(payload.output[0].content[0].text, "ok");
+      assert.equal(response.headers.get("x-api-switch-upstream-protocol"), "anthropic-messages-bridge");
+    } finally {
+      server.kill();
+      upstream.close();
+    }
+  });
+
+  it("serves streamed Codex Responses through the Anthropic messages bridge without upstream SSE", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "api-switch-"));
+    let receivedBody = null;
+    const upstream = http.createServer(async (req, res) => {
+      if (req.method === "POST" && req.url === "/anthropic/v1/messages") {
+        const chunks = [];
+        for await (const chunk of req) chunks.push(chunk);
+        receivedBody = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({
+          id: "msg_anthropic",
+          type: "message",
+          role: "assistant",
+          model: receivedBody.model,
+          content: [{ type: "text", text: "ok" }],
+          stop_reason: "end_turn",
+          usage: { input_tokens: 1, output_tokens: 1 },
+        }));
+        return;
+      }
+      res.writeHead(404, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "not found" }));
+    });
+    await new Promise((resolve) => upstream.listen(0, "127.0.0.1", resolve));
+    const setup = spawnSync(process.execPath, [
+      bin,
+      "setup",
+      "--codex-home",
+      dir,
+      "--name",
+      "anthropic-stream",
+      "--base-url",
+      `http://127.0.0.1:${upstream.address().port}/anthropic`,
+      "--model",
+      "claude-opus-4-8",
+      "--codex-upstream-protocol",
+      "anthropic-messages",
+      "--claude-upstream-protocol",
+      "anthropic-messages",
+    ], { input: "sk-key\n", encoding: "utf8" });
+    assert.equal(setup.status, 0, setup.stderr);
+    const activate = spawnSync(process.execPath, [bin, "default", "--codex-home", dir, "--name", "anthropic-stream"], { encoding: "utf8", env: spawnEnv });
+    assert.equal(activate.status, 0, activate.stderr);
+    const server = spawn(process.execPath, [bin, "proxy", "--codex-home", dir, "--host", "127.0.0.1", "--port", "0"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+
+    try {
+      const baseUrl = await waitForProxyUrl(server);
+      const response = await fetch(`${baseUrl}/responses`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: "claude-opus-4-8", input: "Reply exactly: ok", max_output_tokens: 8, stream: true }),
+      });
+      const text = await response.text();
+      assert.equal(response.status, 200, text);
+      assert.match(response.headers.get("content-type") || "", /text\/event-stream/);
+      assert.equal(response.headers.get("x-api-switch-upstream-protocol"), "anthropic-messages-bridge");
+      assert.equal(receivedBody.stream, false);
+      assert.match(text, /response\.output_text\.delta/);
+      assert.match(text, /ok/);
+      assert.match(text, /\[DONE\]/);
     } finally {
       server.kill();
       upstream.close();

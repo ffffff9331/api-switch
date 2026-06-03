@@ -57,14 +57,14 @@ Options:
   --type <type>            Profile type: relay or official_subscription
   --profile-type <type>    Alias for --type
   --anthropic-base-url <url> Optional Anthropic-compatible base URL for Claude Code
-  --codex-upstream-protocol <protocol> responses, chat-completions, or completions
-  --claude-upstream-protocol <protocol> anthropic-messages or chat-completions
+  --codex-upstream-protocol <protocol> responses, chat-completions, completions, or anthropic-messages
+  --claude-upstream-protocol <protocol> anthropic-messages, chat-completions, responses, or responses-compact
   --client <client>        Client id for routes, default codex
   --upstream-model <model> Model sent to the upstream relay for a mapped route
   --delete-key             Delete the local key file when removing a profile
   --host <host>            Web server host, default 127.0.0.1
   --port <port>            Web server port, default 18600
-  --no-open                Do not open the web UI in a browser
+  --no-open                Do not open the management page in a browser
   --no-migrate-history     Do not rewrite local Codex thread metadata
   --restart-codex          Restart the macOS Codex app after switching
   --force                  Overwrite an existing key file without prompting
@@ -136,8 +136,8 @@ function validateChoice(label, value, allowed) {
 
 function validateProfileOptions(args) {
   validateChoice("Profile type", args.profileType || args.type || "relay", ["relay", "official_subscription"]);
-  validateChoice("Codex upstream protocol", args.codexUpstreamProtocol || args.upstreamProtocol || "", ["responses", "chat-completions", "completions"]);
-  validateChoice("Claude upstream protocol", args.claudeUpstreamProtocol || "", ["anthropic-messages", "chat-completions"]);
+  validateChoice("Codex upstream protocol", args.codexUpstreamProtocol || args.upstreamProtocol || "", ["responses", "chat-completions", "completions", "anthropic-messages"]);
+  validateChoice("Claude upstream protocol", args.claudeUpstreamProtocol || "", ["anthropic-messages", "chat-completions", "responses", "responses-compact"]);
 }
 
 function tomlString(value) {
@@ -2730,6 +2730,7 @@ function htmlPage() {
                   <select id="supportedEndpoint" name="supportedEndpoint">
                     <option value="chat-completions" data-i18n="endpointChatCompletions">/v1/chat/completions · OpenAI compatible</option>
                     <option value="responses" data-i18n="endpointResponses">/v1/responses · Native OpenAI</option>
+                    <option value="responses-compact" data-i18n="endpointResponsesCompact">/v1/responses/compact · Native OpenAI compact</option>
                     <option value="anthropic-messages" data-i18n="endpointAnthropicMessages">/anthropic/v1/messages · Claude compatible</option>
                   </select>
                   <span class="field-help" data-i18n="supportedEndpointHelp">Choose the endpoint your provider supports. For Xiaomi and most OpenAI-compatible relays, use /v1/chat/completions.</span>
@@ -2743,6 +2744,7 @@ function htmlPage() {
                     <option value="responses">Responses</option>
                     <option value="chat-completions">Chat Completions</option>
                     <option value="completions">Completions</option>
+                    <option value="anthropic-messages">Anthropic Messages</option>
                   </select>
                 </label>
                 <label style="display:none"><span data-i18n="claudeProtocolLabel">Claude upstream protocol</span>
@@ -2750,6 +2752,8 @@ function htmlPage() {
                     <option value="" data-i18n="protocolAuto">Auto / native Responses</option>
                     <option value="anthropic-messages">Anthropic Messages</option>
                     <option value="chat-completions">Chat Completions</option>
+                    <option value="responses">Responses</option>
+                    <option value="responses-compact">Responses Compact</option>
                   </select>
                 </label>
                 <label class="full"><span data-i18n="apiKeyLabel">API key</span>
@@ -2831,8 +2835,8 @@ function htmlPage() {
         promoTitle: "Recommended relay: Vayne API",
         promoCopy: "A relay option for using compatible API models with API Switch.",
         promoAction: "View",
-        serviceTitle: "API Switch proxy",
-        serviceCopy: "Use this Base URL in Codex API mode:",
+        serviceTitle: "API Switch background proxy",
+        serviceCopy: "Browser is only for management. Use this Base URL in Codex API mode:",
         proxyStart: "Start",
         proxyStop: "Stop",
         proxyRestart: "Restart",
@@ -2877,6 +2881,7 @@ function htmlPage() {
         supportedEndpointLabel: "Supported endpoint",
         endpointChatCompletions: "/v1/chat/completions · OpenAI compatible",
         endpointResponses: "/v1/responses · Native OpenAI",
+        endpointResponsesCompact: "/v1/responses/compact · Native OpenAI compact",
         endpointAnthropicMessages: "/anthropic/v1/messages · Claude compatible",
         supportedEndpointHelp: "Choose the endpoint your provider supports. For Xiaomi and most OpenAI-compatible relays, use /v1/chat/completions.",
         anthropicBaseUrlLabel: "Anthropic-compatible base URL",
@@ -2935,8 +2940,8 @@ function htmlPage() {
         promoTitle: "推荐中转站：Vayne API",
         promoCopy: "适合配合 API Switch 使用的兼容 API 中转站。",
         promoAction: "查看",
-        serviceTitle: "API Switch 代理",
-        serviceCopy: "Codex API 模式里填写这个 Base URL：",
+        serviceTitle: "API Switch 后台代理",
+        serviceCopy: "浏览器只用于管理。Codex API 模式里填写这个 Base URL：",
         proxyStart: "开启",
         proxyStop: "关闭",
         proxyRestart: "重启",
@@ -2981,6 +2986,7 @@ function htmlPage() {
         supportedEndpointLabel: "支持的接口",
         endpointChatCompletions: "/v1/chat/completions · OpenAI 兼容",
         endpointResponses: "/v1/responses · OpenAI 原生",
+        endpointResponsesCompact: "/v1/responses/compact · OpenAI 原生压缩",
         endpointAnthropicMessages: "/anthropic/v1/messages · Claude 兼容",
         supportedEndpointHelp: "选择服务商实际支持的接口。小米和大多数 OpenAI 兼容中转站选 /v1/chat/completions。",
         anthropicBaseUrlLabel: "兼容 Anthropic 的 Base URL",
@@ -3169,6 +3175,7 @@ function htmlPage() {
       const claudeProtocol = profile.claudeUpstreamProtocol || "";
       let supportedEndpoint = "responses";
       if (claudeProtocol === "anthropic-messages") supportedEndpoint = "anthropic-messages";
+      else if (claudeProtocol === "responses-compact") supportedEndpoint = "responses-compact";
       else if (codexProtocol === "chat-completions" || claudeProtocol === "chat-completions") supportedEndpoint = "chat-completions";
       else if (codexProtocol === "responses") supportedEndpoint = "responses";
       document.querySelector("#supportedEndpoint").value = supportedEndpoint;
@@ -3664,9 +3671,13 @@ function normalizeWebPayload(body) {
     claudeUpstreamProtocol = "";
     anthropicBaseUrl = "";
   } else if (supportedEndpoint === "anthropic-messages") {
-    codexUpstreamProtocol = "";
+    codexUpstreamProtocol = "anthropic-messages";
     claudeUpstreamProtocol = "anthropic-messages";
     anthropicBaseUrl = anthropicBaseUrl || String(body.baseUrl || "").trim();
+  } else if (supportedEndpoint === "responses-compact") {
+    codexUpstreamProtocol = "responses";
+    claudeUpstreamProtocol = "responses-compact";
+    anthropicBaseUrl = "";
   }
   return {
     name,
@@ -3782,7 +3793,11 @@ function startWeb(args) {
   const recordProxyRequest = (entry) => {
     const target = entry.profile || proxyState.clients[entry.client || "codex"]?.targetProfile || "";
     const managed = target ? getManagedProfile(codexHome, target) : null;
-    const protocol = managed ? (managed.codexUpstreamProtocol || managed.upstreamProtocol || "responses") : "";
+    const protocol = managed
+      ? (entry.client === "claude-code"
+        ? (managed.claudeUpstreamProtocol || managed.codexUpstreamProtocol || managed.upstreamProtocol || "responses")
+        : (managed.codexUpstreamProtocol || managed.upstreamProtocol || "responses"))
+      : "";
     const record = { ...entry, protocol, at: new Date().toISOString() };
     recentProxyRequests.unshift(record);
     recentProxyRequests.splice(50);
@@ -4124,15 +4139,10 @@ function startWeb(args) {
     if (error && error.code === "EADDRINUSE") {
       const url = `http://${host}:${port}`;
       if (await isApiSwitchRunning(url)) {
-        console.log(`API Switch web UI is already running: ${url}`);
+        console.log(`API Switch management page is already running: ${url}`);
         if (!args.noOpen) openBrowser(url);
-        // In foreground CLI mode this is just a friendly success.  Under a
-        // service manager (LaunchAgent/systemd/Startup wrapper), exiting here
-        // can create a restart loop when a stale foreground instance already
-        // owns the port.  Keep the service process alive so KeepAlive does not
-        // spin, and so a later stop of the stale owner lets the service bind.
         if (process.env.API_SWITCH_SERVICE_MANAGER === "1") {
-          setInterval(() => {}, 60 * 60 * 1000);
+          waitForServiceTakeover(url);
           return;
         }
         process.exit(0);
@@ -4147,7 +4157,7 @@ function startWeb(args) {
   server.listen(port, host, () => {
     const address = server.address();
     const url = `http://${host}:${address.port}`;
-    console.log(`API Switch web UI: ${url}`);
+    console.log(`API Switch management page: ${url}`);
     if (!args.noOpen) {
       openBrowser(url);
     }
@@ -4166,6 +4176,16 @@ async function isApiSwitchRunning(url) {
   } catch {
     return false;
   }
+}
+
+function waitForServiceTakeover(url) {
+  console.log(`API Switch service is waiting to own ${url}. Stop the foreground web process to let the service take over.`);
+  const timer = setInterval(async () => {
+    if (await isApiSwitchRunning(url)) return;
+    console.log(`API Switch service takeover requested for ${url}.`);
+    clearInterval(timer);
+    process.exit(0);
+  }, 2000);
 }
 
 function openBrowser(url) {
